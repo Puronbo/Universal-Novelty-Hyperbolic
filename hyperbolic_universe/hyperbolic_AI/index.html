@@ -17,6 +17,15 @@
   .header .status { display:flex; align-items:center; gap:5px; font-size:11px; color:#8b949e; }
   .header .dot { width:6px; height:6px; border-radius:50%; background:#484f58; }
   .header .dot.online { background:#3fb950; }
+  .header .lockout-badge { display:none; align-items:center; gap:4px; font-size:10px; color:#f85149; background:#f8514911; border:1px solid #f8514933; border-radius:4px; padding:1px 6px; margin-left:6px; }
+  .header .lockout-badge.show { display:inline-flex; }
+  .input-row.locked { border-color:#f85149; background:#f8514908; }
+  .input-row.locked textarea::placeholder { color:#f8514966; }
+  .lockout-msg { display:none; margin-bottom:6px; padding:8px 10px; background:#f8514908; border:1px solid #f8514933; border-radius:4px; font-size:11px; color:#f85149; }
+  .lockout-msg.show { display:block; }
+  .lockout-msg .phrase { color:#f2c744; font-size:13px; display:block; margin-top:4px; padding:6px 8px; background:#0b0e14; border-radius:3px; border:1px solid #30363d; }
+  .header.locked, .bottom-bar.locked { border-color:#f85149; }
+  .header.locked .lockout-badge.show { display:inline-flex; }
 
   .main { flex:1; display:flex; overflow:hidden; }
 
@@ -91,6 +100,7 @@
   <div class="status">
     <span class="dot online" id="statusDot"></span>
     <span id="statusText">connected</span>
+    <span class="lockout-badge" id="lockoutBadge">🔒 LOCKED</span>
   </div>
 </div>
 
@@ -100,7 +110,11 @@
       <div id="messageList"></div>
     </div>
     <div class="input-area">
-      <div class="input-row">
+      <div class="lockout-msg" id="lockoutMsg">
+        🔒 Locked. Say this to get back in:
+        <span class="phrase" id="lockoutPhrase"></span>
+      </div>
+      <div class="input-row" id="inputRow">
         <textarea id="input" rows="1" placeholder="Type a message..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
         <button id="sendBtn" onclick="send()">&#8593;</button>
       </div>
@@ -176,12 +190,51 @@ function updateWidget(state) {
 }
 
 // ---- mind state ----
+function updateLockout(lockout) {
+  const badge = document.getElementById('lockoutBadge');
+  const msg = document.getElementById('lockoutMsg');
+  const phrase = document.getElementById('lockoutPhrase');
+  const input = document.getElementById('input');
+  const inputRow = document.getElementById('inputRow');
+  const header = document.querySelector('.header');
+  const bar = document.querySelector('.bottom-bar');
+
+  if (lockout && lockout.status === 'locked_out') {
+    badge.classList.add('show');
+    msg.classList.add('show');
+    phrase.textContent = lockout.phrase || '...';
+    input.placeholder = 'Say the phrase to get back in...';
+    inputRow.classList.add('locked');
+    header.classList.add('locked');
+    bar.classList.add('locked');
+  } else if (lockout && lockout.status === 'warned') {
+    badge.textContent = '⚠️ WARNED';
+    badge.classList.add('show');
+    msg.classList.remove('show');
+    input.placeholder = 'Type a message...';
+    inputRow.classList.remove('locked');
+    header.classList.remove('locked');
+    bar.classList.remove('locked');
+  } else {
+    badge.classList.remove('show');
+    msg.classList.remove('show');
+    input.placeholder = 'Type a message...';
+    inputRow.classList.remove('locked');
+    header.classList.remove('locked');
+    bar.classList.remove('locked');
+  }
+}
+
 async function pollMind() {
   try {
     const res = await fetch('/api/mind');
     const data = await res.json();
     const affect = data.affect || {};
     const thoughts = data.thoughts || [];
+    const lockout = data.lockout || {};
+
+    // Lockout state
+    updateLockout(lockout);
 
     // Affect tags
     const affEl = document.getElementById('affectDisplay');

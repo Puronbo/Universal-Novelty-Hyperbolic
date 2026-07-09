@@ -6,7 +6,8 @@
   },
   "thresholds": {
     "firewall": 0.85,
-    "entropy": 0.70
+    "entropy": 0.70,
+    "negativity": 0.70
   },
   "sources": [
     {

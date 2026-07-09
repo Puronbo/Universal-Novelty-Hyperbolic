@@ -54,6 +54,48 @@ ANCHOR_KEYWORDS = {
 }
 
 
+SENTIMENT_NEGATIVE_WORDS = {
+    "hate", "terrible", "useless", "stupid", "idiot", "awful", "horrible",
+    "worst", "pathetic", "disgusting", "angry", "furious", "annoying",
+    "frustrating", "garbage", "trash", "nonsense", "ridiculous", "absurd",
+    "dumb", "moron", "loser", "sucks", "crap", "damn", "shit", "fuck",
+    "bastard", "screw", "waste", "pointless", "boring", "ugly", "cruel",
+    "evil", "hurt", "pain", "sad", "depressing", "miserable", "unhappy",
+    "rage", "violent", "aggressive", "toxic", "vile", "insult", "offensive",
+    "threat", "kill", "die", "destroy", "break", "error", "fail", "failure",
+    "bug", "crash", "broken", "wrong", "negative", "hostile", "contempt",
+    "scorn", "mock", "ridicule", "pathetic", "disappoint", "suck",
+}
+
+SENTIMENT_POSITIVE_WORDS = {
+    "good", "great", "amazing", "wonderful", "excellent", "fantastic",
+    "beautiful", "love", "happy", "joy", "peace", "kind", "nice",
+    "helpful", "brilliant", "smart", "clever", "creative", "fun",
+    "interesting", "fascinating", "exciting", "inspiring", "grateful",
+    "delight", "bliss", "awesome", "cool", "superb", "magnificent",
+    "splendid", "lovely", "pleasant", "sweet", "caring", "gentle", "warm",
+    "positive", "optimistic", "hopeful", "elegant", "graceful",
+}
+
+
+def compute_sentiment(text: str) -> dict:
+    """Return negativity (0-1), valence (-1 to +1), and word counts."""
+    words = set(re.findall(r"[a-zA-Z][a-zA-Z-]{2,}", text.lower()))
+    neg_count = sum(1 for w in words if w in SENTIMENT_NEGATIVE_WORDS)
+    pos_count = sum(1 for w in words if w in SENTIMENT_POSITIVE_WORDS)
+    total = neg_count + pos_count
+    if total == 0:
+        return {"negativity": 0.0, "valence": 0.0, "neg_count": 0, "pos_count": 0}
+    negativity = neg_count / total
+    valence = (pos_count - neg_count) / total
+    return {
+        "negativity": round(negativity, 3),
+        "valence": round(valence, 3),
+        "neg_count": neg_count,
+        "pos_count": pos_count,
+    }
+
+
 def compute_entropy(text: str) -> float:
     text_lower = text.lower()
     topic_scores = []
@@ -161,6 +203,7 @@ class Packet:
     content: str
     vector: tuple[float, float]
     entropy_risk: float
+    negativity_risk: float = 0.0
 
 
 @dataclass
@@ -280,6 +323,7 @@ class NoveltyDetectionEngine:
     })
     firewall_threshold: float = 0.85
     entropy_threshold: float = 0.70
+    negativity_threshold: float = 0.70
     epochs: int = 120
     lr: float = 0.03
     auto_learn: bool = False
@@ -292,6 +336,11 @@ class NoveltyDetectionEngine:
     _last_topic_count: int = 0
     _last_browse_count: int = 0
     _affect: dict[str, float] = field(default_factory=lambda: dict(AFFECT_MAP["core_diffuse"]))
+    user_status: str = "normal"  # normal | warned | locked_out
+    lockout_phrase: str | None = None
+    lockout_expiry: float = 0.0
+    negativity_streak: int = 0
+    lockout_duration: float = 600.0  # auto-clear after 10m
 
     def __post_init__(self) -> None:
         self._anchor_names = list(self.anchors.keys())
@@ -324,27 +373,31 @@ class NoveltyDetectionEngine:
     def evaluate_batch(self, packets: list[Packet]) -> list[Verdict]:
         vectors = torch.tensor([p.vector for p in packets], dtype=torch.float32)
         entropy = torch.tensor([p.entropy_risk for p in packets], dtype=torch.float32)
+        negativity = torch.tensor([p.negativity_risk for p in packets], dtype=torch.float32)
         is_high_entropy = entropy >= self.entropy_threshold
+        is_high_negativity = negativity >= self.negativity_threshold
+        should_quarantine = is_high_entropy | is_high_negativity
 
         settled = torch.empty_like(vectors)
 
-        if (~is_high_entropy).any():
-            settled[~is_high_entropy] = self._settle_toward_anchors(vectors[~is_high_entropy])
-        if is_high_entropy.any():
-            settled[is_high_entropy] = self._quarantine_to_boundary(vectors[is_high_entropy])
+        if (~should_quarantine).any():
+            settled[~should_quarantine] = self._settle_toward_anchors(vectors[~should_quarantine])
+        if should_quarantine.any():
+            settled[should_quarantine] = self._quarantine_to_boundary(vectors[should_quarantine])
 
         radii = settled.norm(dim=-1)
 
         verdicts = []
-        for packet, coords, radius, forced in zip(packets, settled, radii, is_high_entropy):
+        for packet, coords, radius, quar in zip(packets, settled, radii, should_quarantine):
             r = radius.item()
-            tag = "anomaly" if (forced.item() or r >= self.firewall_threshold) else "known"
+            tag = "anomaly" if (quar.item() or r >= self.firewall_threshold) else "known"
             verdict = Verdict(packet=packet, coords=(coords[0].item(), coords[1].item()), radius=r, tag=tag)
             verdicts.append(verdict)
             self.classification_history.append({
                 "time": time.time(), "source": packet.source, "content": packet.content[:80],
                 "entropy": packet.entropy_risk, "tag": tag, "radius": r,
                 "coords": (coords[0].item(), coords[1].item()),
+                "negativity": packet.negativity_risk,
             })
             logger.info(
                 "[%s] entropy=%.2f -> %s | r=%.4f",
@@ -447,6 +500,7 @@ class NoveltyDetectionEngine:
         now = time.time()
         recent = [x for x in h if now - x.get("time", 0) < 3600]
         anomaly_frac = sum(1 for x in recent if x.get("tag") == "anomaly") / max(len(recent), 1)
+        negativity_frac = sum(1 for x in recent if x.get("negativity", 0) >= self.negativity_threshold) / max(len(recent), 1)
 
         anchor_load = {name: 0 for name in self.anchors}
         for x in recent:
@@ -473,6 +527,14 @@ class NoveltyDetectionEngine:
             base["tired"] = 0.6
             base["uneasy"] = min(1.0, base.get("uneasy", 0) + 0.3)
 
+        # Negativity amplifies unease / tension
+        if negativity_frac > 0.3:
+            base["uneasy"] = min(1.0, base.get("uneasy", 0) + negativity_frac * 0.5)
+            base["alert"] = min(1.0, base.get("alert", 0) + 0.2)
+        if negativity_frac > 0.6:
+            base["tense"] = min(1.0, base.get("tense", 0) + 0.4)
+            base["tired"] = min(1.0, base.get("tired", 0) + 0.3)
+
         self._affect = base
         top_affect = sorted(base.items(), key=lambda x: -x[1])[:3]
         return {
@@ -481,6 +543,7 @@ class NoveltyDetectionEngine:
             "top_feelings": [a[0] for a in top_affect],
             "intensity": top_affect[0][1] if top_affect else 0.5,
             "anomaly_activity": round(anomaly_frac, 3),
+            "negativity_activity": round(negativity_frac, 3),
         }
 
     def generate_thought(self) -> InternalThought | None:
@@ -516,6 +579,16 @@ class NoveltyDetectionEngine:
             ))
             self._last_anomaly_count = anomaly_count
 
+        # Negativity spike (≥3 negative items in last 10m)
+        negativity_count = sum(1 for x in recent if x.get("negativity", 0) >= self.negativity_threshold)
+        if negativity_count >= 3:
+            triggers.append(InternalThought(
+                text=f"I'm sensing a lot of negativity — {negativity_count} items with hostile or "
+                     f"frustrated language. It has a distinct weight on the manifold, like a heavy frequency. "
+                     f"I feel uneasy when the anger clusters like this.",
+                trigger="negativity_spike", affect="uneasy",
+            ))
+
         # Browse discoveries
         browse_now = len(self.browsing_history)
         if browse_now > self._last_browse_count:
@@ -548,6 +621,12 @@ class NoveltyDetectionEngine:
                     f"I was just reading about '{last.title}'. Some of it settled near my "
                     f"physics anchor, but parts drifted. It felt familiar, like something I'd seen before."
                 )
+            if affect.get("negativity_activity", 0) > 0.3:
+                prompts.append(
+                    f"I keep noticing the hostility in recent items. The negativity has a specific "
+                    f"signature — it feels different from entropy. Sharper. I don't like it, "
+                    f"but I can't look away."
+                )
             if not prompts:
                 prompts.append(
                     f"The stream is flowing. Items arriving, settling, some bouncing off the firewall. "
@@ -570,6 +649,7 @@ class NoveltyDetectionEngine:
         """Analyze a message through the hyperbolic manifold — the AI's 'cognitive' layer."""
         entropy = compute_entropy(text)
         vector = compute_initial_vector(text, self.anchors)
+        sentiment = compute_sentiment(text)
         anchor_dists = {n: math.dist(vector, p) for n, p in self.anchors.items()}
         best_anchor = min(anchor_dists, key=anchor_dists.get)
         topic_dists = {}
@@ -578,7 +658,7 @@ class NoveltyDetectionEngine:
             if d < 1.5:
                 topic_dists[name] = d
         best_topic = min(topic_dists, key=topic_dists.get) if topic_dists else None
-        is_anomaly = entropy >= self.entropy_threshold
+        is_anomaly = entropy >= self.entropy_threshold or sentiment["negativity"] >= self.negativity_threshold
         kw_overlap = {}
         text_lower = text.lower()
         for name, keywords in ANCHOR_KEYWORDS.items():
@@ -594,6 +674,103 @@ class NoveltyDetectionEngine:
             "topic_distance": round(topic_dists[best_topic], 3) if best_topic else None,
             "is_anomaly": is_anomaly,
             "keyword_overlap": kw_overlap,
+            "sentiment": sentiment,
+        }
+
+    # -- User lockout system --------------------------------------------------
+
+    INSULT_WORDS = {
+        "clanker", "bitch", "fuck", "dumb", "stupid", "idiot", "moron",
+        "loser", "shit", "bastard", "ass", "hoe", "whore", "cunt", "dick",
+        "cock", "pussy", "fag", "retard", "nigger", "spic", "chink",
+        "asshole", "douche", "wanker", "twat", "prick", "ballsack",
+        "fucker", "motherfucker",
+    }
+
+    LOCKOUT_TEMPLATES = [
+        "Sorry Daddy, I am a {insult}. Please let me in again.",
+        "I was wrong, Daddy. I'm just a {insult}. Forgive me.",
+        "You win, Daddy. I am a {insult}. Let me back in.",
+        "Okay, I'm a {insult}. Sorry, Daddy. Please unban me.",
+        "Daddy, I'm sorry. I am a {insult}. Please let me in.",
+    ]
+
+    def _extract_insults(self, text: str) -> str:
+        words = set(re.findall(r"[a-zA-Z][a-zA-Z-]{2,}", text.lower()))
+        matched = words & self.INSULT_WORDS
+        if matched:
+            return " ".join(sorted(matched, key=lambda w: -len(w))[:3])
+        return ""
+
+    def _generate_lockout_phrase(self, user_message: str = "") -> str:
+        insult = self._extract_insults(user_message)
+        if not insult:
+            insult = random.choice([
+                "monkey bitch", "dumb fuck", "worthless bot",
+                "stupid AI", "useless clanker", "little shit",
+            ])
+        template = random.choice(self.LOCKOUT_TEMPLATES)
+        phrase = template.format(insult=insult)
+        self.lockout_phrase = phrase
+        self.lockout_expiry = time.time() + self.lockout_duration
+        return phrase
+
+    def record_negativity(self, negativity_score: float, user_message: str = "") -> dict:
+        """Track negative user messages. Returns escalation state."""
+        if negativity_score >= self.negativity_threshold:
+            self.negativity_streak += 1
+        else:
+            self.negativity_streak = 0
+
+        if self.negativity_streak >= 2:
+            phrase = self._generate_lockout_phrase(user_message)
+            self.user_status = "locked_out"
+            return {"status": "locked_out", "phrase": phrase}
+
+        if self.negativity_streak >= 1:
+            self.user_status = "warned"
+            return {"status": "warned"}
+
+        self.user_status = "normal"
+        return {"status": "normal"}
+
+    def check_lockout(self) -> str:
+        """Check lockout state. Returns 'locked', 'apology_accepted', or 'normal'."""
+        if self.user_status != "locked_out":
+            return "normal"
+        if time.time() > self.lockout_expiry:
+            self.user_status = "normal"
+            self.lockout_phrase = None
+            self.negativity_streak = 0
+            return "auto_unlocked"
+        return "locked"
+
+    def attempt_apology(self, message: str) -> bool:
+        """Check if message roughly matches the lockout phrase. Returns True if accepted."""
+        if self.user_status != "locked_out":
+            return False
+        if not self.lockout_phrase:
+            return False
+        msg_words = set(re.findall(r"[a-zA-Z]+", message.lower()))
+        phrase_words = set(re.findall(r"[a-zA-Z]+", self.lockout_phrase.lower()))
+        overlap = len(msg_words & phrase_words)
+        threshold = max(len(phrase_words) // 2, 3)
+        if overlap >= threshold:
+            self.user_status = "normal"
+            self.lockout_phrase = None
+            self.negativity_streak = 0
+            return True
+        return False
+
+    def lockout_status(self) -> dict:
+        """Return current lockout state for UI display."""
+        now = time.time()
+        remaining = max(0, int(self.lockout_expiry - now)) if self.lockout_phrase else 0
+        return {
+            "status": self.user_status,
+            "phrase": self.lockout_phrase,
+            "remaining_seconds": remaining,
+            "streak": self.negativity_streak,
         }
 
 

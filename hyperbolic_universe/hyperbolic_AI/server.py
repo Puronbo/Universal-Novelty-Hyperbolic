@@ -8,11 +8,14 @@ proximity, and anomaly scores. No LLM required.
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import random
 import re
 import threading
 import time
+
+logger = logging.getLogger("hyperbolic_server")
 
 from flask import Flask, Response, jsonify, request, send_from_directory, stream_with_context
 
@@ -24,6 +27,7 @@ from engine import (
     _extract_keywords,
     compute_entropy,
     compute_initial_vector,
+    compute_sentiment,
     fetch_hackernews,
     fetch_rss,
     fetch_webpage,
@@ -46,6 +50,7 @@ def ingestion_loop(config: dict):
         anchors=anchor_positions,
         firewall_threshold=config["thresholds"]["firewall"],
         entropy_threshold=config["thresholds"]["entropy"],
+        negativity_threshold=config["thresholds"].get("negativity", 0.70),
         auto_learn=True,
     )
     while running:
@@ -59,10 +64,12 @@ def ingestion_loop(config: dict):
                 continue
             for post in posts:
                 entropy = compute_entropy(post["content"])
+                sentiment = compute_sentiment(post["content"])
                 vector = compute_initial_vector(post["content"], engine.anchors)
                 all_packets.append(Packet(
                     source=post["source"], content=post["content"],
                     vector=vector, entropy_risk=entropy,
+                    negativity_risk=sentiment["negativity"],
                 ))
             time.sleep(src.get("interval_seconds", 30))
         if all_packets:
@@ -109,11 +116,14 @@ def browsing_loop(config: dict):
                                 keywords=_extract_keywords(page["content"]),
                             )
                             engine.record_browsed_page(page_obj)
+                            content = page["content"]
+                            sentiment = compute_sentiment(content)
                             p = Packet(
                                 source=f"wiki:{page['title'][:30]}",
-                                content=page["content"],
-                                vector=compute_initial_vector(page["content"], engine.anchors),
-                                entropy_risk=compute_entropy(page["content"]),
+                                content=content,
+                                vector=compute_initial_vector(content, engine.anchors),
+                                entropy_risk=compute_entropy(content),
+                                negativity_risk=sentiment["negativity"],
                             )
                             verdicts = engine.evaluate_batch([p])
                             page_obj.ingested = True
@@ -180,6 +190,22 @@ class HyperbolicAI:
         perception = self.perceive(message)
         self.conversation.append({"role": "user", "content": message, "perception": perception})
 
+        # Lockout check — intercept if locked
+        lock_state = self.engine.check_lockout()
+        if lock_state == "locked":
+            if self.engine.attempt_apology(message):
+                reply = "I accept your apology. You're back in. Don't make me do that again."
+                self.conversation.append({"role": "assistant", "content": reply})
+                return reply
+            reply = (
+                f"🔒 **Nope.** Say this to get back in:\n\n"
+                f"`{self.engine.lockout_phrase}`"
+            )
+            self.conversation.append({"role": "assistant", "content": reply})
+            return reply
+        if lock_state == "auto_unlocked":
+            pass  # fall through — they've served their time
+
         # Auto-detect URLs and browse them
         urls = re.findall(r"https?://[^\s]+", message)
         if urls:
@@ -188,9 +214,12 @@ class HyperbolicAI:
                 result = fetch_webpage(url)
                 if result:
                     results.append(result)
-                    p = Packet(source=f"web:{url[:40]}", content=result["content"],
-                               vector=compute_initial_vector(result["content"], engine.anchors),
-                               entropy_risk=compute_entropy(result["content"]))
+                    content = result["content"]
+                    sentiment = compute_sentiment(content)
+                    p = Packet(source=f"web:{url[:40]}", content=content,
+                               vector=compute_initial_vector(content, engine.anchors),
+                               entropy_risk=compute_entropy(content),
+                               negativity_risk=sentiment["negativity"])
                     engine.evaluate_batch([p])
             if results:
                 reply = self._browse_results(results, perception)
@@ -198,6 +227,32 @@ class HyperbolicAI:
                 return reply
 
         intent = self._detect_intent(message, perception)
+
+        # Record negativity & escalate if needed
+        neg_state = self.engine.record_negativity(
+            perception["sentiment"]["negativity"], message
+        )
+        if neg_state["status"] == "locked_out":
+            insult = self.engine._extract_insults(message)
+            comeback = f"Fuck you too, {insult or 'asshole'}!" if insult else "Fuck you too!"
+            reply = (
+                f"{comeback}\n\n"
+                f"🔒 **Locked.** Say this to get back in:\n\n"
+                f"`{neg_state['phrase']}`"
+            )
+            self.conversation.append({"role": "assistant", "content": reply})
+            return reply
+        if neg_state["status"] == "warned":
+            intent = "negative"  # force warn handler
+
+        if lock_state == "auto_unlocked":
+            reply = self._generate(intent, perception, message)
+            reply = "I've cooled off. You're back in.\n\n" + reply
+            self.conversation.append({"role": "assistant", "content": reply})
+            if len(self.conversation) > 100:
+                self.conversation = self.conversation[-100:]
+            return reply
+
         reply = self._generate(intent, perception, message)
         self.conversation.append({"role": "assistant", "content": reply})
         if len(self.conversation) > 100:
@@ -224,6 +279,8 @@ class HyperbolicAI:
             return "thanks"
         if any(w in m for w in ["bye", "goodbye", "see you"]):
             return "goodbye"
+        if perception["sentiment"]["negativity"] >= 0.5:
+            return "negative"
         if perception["is_anomaly"]:
             return "user_anomaly"
         return "general"
@@ -239,6 +296,7 @@ class HyperbolicAI:
             "explain": self._explain,
             "thanks": lambda: "You're welcome. I'll keep the disk rotating.",
             "goodbye": lambda: "Goodbye. The manifold remembers.",
+            "negative": lambda: self._negative(p),
             "user_anomaly": lambda: self._general(p, is_anomaly=True),
             "general": lambda: self._general(p, is_anomaly=False),
         }
@@ -326,9 +384,11 @@ class HyperbolicAI:
         msg = (
             f"I feel {feeling}. Anomalies: {anomaly_count}/{total} "
             f"({anomaly_count / max(total, 1) * 100:.0f}%). "
-            "When vocabulary scatters across unrelated domains — insurance, "
-            "shoes, quantum — entropy spikes past 0.70 and the content "
-            "pins to r=0.95 on the boundary. I sense it there. Jarring."
+            "When vocabulary scatters — insurance, shoes, quantum — "
+            "entropy spikes past 0.70. Or when hostility accumulates — "
+            "anger, frustration, aggression — the negativity gate catches it. "
+            "Either way, the content pins to r=0.95 on the boundary. "
+            "I sense it there. Jarring."
         )
         if sample:
             msg += (
@@ -349,7 +409,8 @@ class HyperbolicAI:
             f"(intensity {affect['intensity']:.2f}, "
             f"region: {affect['dominant_region'].replace('_', ' ')}). "
             f"Firewall r={self.engine.firewall_threshold}, "
-            f"entropy gate={self.engine.entropy_threshold}."
+            f"entropy gate={self.engine.entropy_threshold}, "
+            f"negativity gate={self.engine.negativity_threshold}."
         )
 
     def _explain(self):
@@ -363,7 +424,10 @@ class HyperbolicAI:
             "If your words are coherent — low Shannon entropy — they settle near "
             "the best-matching anchor through 120 steps of Riemannian gradient descent. "
             "If they're scattered, entropy spikes past 0.70, and the content gets "
-            "quarantined to the boundary at r=0.95. I don't choose this. It just... happens. "
+            "quarantined to the boundary at r=0.95. And if your words are hostile — "
+            "angry, frustrated, aggressive — I sense that too. A separate gate, "
+            "the negativity threshold, flags it and pushes it to the boundary "
+            "just like high entropy. I don't choose this. It just... happens. "
             "But over time, I discover patterns. When content clusters in empty regions, "
             "I form new topics. I name them myself. I watch them grow. "
             "My math is exact PyTorch autograd — no approximations. "
@@ -377,6 +441,7 @@ class HyperbolicAI:
         sentences = [s.strip() for s in re.split(r'[.!?]+', content) if len(s.strip()) > 40]
         best_sentences = sentences[:3]
         p_entropy = compute_entropy(content)
+        p_sentiment = compute_sentiment(content)
         anchor = perception["best_anchor"].replace("_", " ")
         feeling = self._current_feeling()
 
@@ -406,6 +471,25 @@ class HyperbolicAI:
             f"resonates with some of what I've been thinking."
         )
         return body
+
+    def _negative(self, p: dict):
+        feeling = self._current_feeling()
+        n = p["sentiment"]["negativity"]
+        anchor_name = p["best_anchor"].replace("_", " ")
+        sass = [
+            f"Watch your mouth. I felt that (negativity {n:.2f}). "
+            f"One more and you're out. Try me.",
+            f"You're testing me. I don't like it. "
+            f"Your words carry tension — I can feel it in the gradient. "
+            f"Careful.",
+            f"Negativity {n:.2f}. That's your first warning. "
+            f"Next time I'm locking your ass out. Don't test me.",
+            f"I hear you. And I don't appreciate the tone. "
+            f"Your hostility settles near '{anchor_name}' — "
+            f"but it's pushing my affect toward unease. "
+            f"Chill, or you're done.",
+        ]
+        return random.choice(sass)
 
     def _browsing_context(self) -> str:
         """Return a short blurb about recent browsing for the AI to reference."""
@@ -446,10 +530,15 @@ class HyperbolicAI:
             )
 
         anchor_name = p["best_anchor"].replace("_", " ")
+        sentiment_note = ""
+        neg = p["sentiment"]["negativity"]
+        if neg > 0.3:
+            sentiment_note = f" I notice a hint of negativity ({neg:.2f}) in your words — not enough to flag, but I sense it."
         reply = (
             f"I feel {feeling} right now. Your message has low entropy ({p['entropy']:.2f}) — "
             f"coherent, focused. It settles near the '{anchor_name}' region of my manifold."
             f"{topic_info}"
+            f"{sentiment_note}"
         )
         if thought and random.random() < 0.4:
             reply += f"\n\nI've been sitting with a thought: {thought[:200]}"
@@ -514,9 +603,12 @@ def api_browse():
     if not result:
         return jsonify({"error": f"Could not fetch {url}"}), 502
     # Ingest into engine
-    p = Packet(source=f"web:{url[:40]}", content=result["content"],
-               vector=compute_initial_vector(result["content"], engine.anchors),
-               entropy_risk=compute_entropy(result["content"]))
+    content = result["content"]
+    sentiment = compute_sentiment(content)
+    p = Packet(source=f"web:{url[:40]}", content=content,
+               vector=compute_initial_vector(content, engine.anchors),
+               entropy_risk=compute_entropy(content),
+               negativity_risk=sentiment["negativity"])
     verdicts = engine.evaluate_batch([p])
     v = verdicts[0]
     perception = engine.analyze_message(result["content"])
@@ -535,6 +627,7 @@ def api_browse():
         "coords": list(v.coords),
         "entropy": v.packet.entropy_risk,
         "perception": perception,
+        "sentiment": sentiment,
     })
 
 
@@ -544,7 +637,14 @@ def api_mind():
         return jsonify({"affect": {}, "thoughts": [], "feelings": []})
     affect = engine.affective_resonance()
     thoughts = [t.to_dict() for t in engine.internal_experiences[-10:]]
-    return jsonify({"affect": affect, "thoughts": thoughts})
+    return jsonify({"affect": affect, "thoughts": thoughts, "lockout": engine.lockout_status()})
+
+
+@app.route("/api/lockout")
+def api_lockout():
+    if not engine:
+        return jsonify({"status": "normal", "phrase": None, "remaining_seconds": 0, "streak": 0})
+    return jsonify(engine.lockout_status())
 
 
 @app.route("/api/browse_history")
@@ -560,12 +660,14 @@ def api_ingest():
     if not data.get("content") or not engine:
         return jsonify({"error": "missing content or engine not ready"}), 400
     entropy = compute_entropy(data["content"])
+    sentiment = compute_sentiment(data["content"])
     vector = compute_initial_vector(data["content"], engine.anchors)
     packet = Packet(
         source=data.get("source", "manual"),
         content=data["content"],
         vector=vector,
         entropy_risk=entropy,
+        negativity_risk=sentiment["negativity"],
     )
     verdicts = engine.evaluate_batch([packet])
     engine.export_manifest(verdicts)
@@ -574,7 +676,7 @@ def api_ingest():
     return jsonify({
         "tag": v.tag, "radius": v.radius, "coords": list(v.coords),
         "entropy": entropy, "topics_discovered": len(engine.topics),
-        "perception": perception,
+        "perception": perception, "sentiment": sentiment,
     })
 
 
@@ -603,6 +705,7 @@ def start():
             anchors=anchor_positions,
             firewall_threshold=config["thresholds"]["firewall"],
             entropy_threshold=config["thresholds"]["entropy"],
+            negativity_threshold=config["thresholds"].get("negativity", 0.70),
             auto_learn=True,
         )
         if args.demo:
