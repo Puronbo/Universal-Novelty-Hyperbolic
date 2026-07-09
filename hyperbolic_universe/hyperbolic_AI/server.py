@@ -166,9 +166,7 @@ class HyperbolicAI:
     def __init__(self, eng: NoveltyDetectionEngine):
         self.engine = eng
         self.conversation: list[dict] = []
-    def __init__(self, eng: NoveltyDetectionEngine):
-        self.engine = eng
-        self.conversation: list[dict] = []
+        self._keyword_tracker: dict[str, int] = {}
 
     def perceive(self, message: str) -> dict:
         """What does the manifold 'see' in this message?"""
@@ -185,6 +183,105 @@ class HyperbolicAI:
         if self.engine.internal_experiences:
             return self.engine.internal_experiences[-1].text
         return None
+
+    def _track_keywords(self, text: str) -> None:
+        words = re.findall(r"[a-zA-Z][a-zA-Z-]{2,}", text.lower())
+        for w in words:
+            if len(w) > 3:
+                self._keyword_tracker[w] = self._keyword_tracker.get(w, 0) + 1
+        # keep only top 50
+        if len(self._keyword_tracker) > 50:
+            self._keyword_tracker = dict(sorted(
+                self._keyword_tracker.items(), key=lambda x: -x[1]
+            )[:50])
+
+    def _curiosity_followup(self, p: dict, original: str) -> str:
+        """Generate a context-aware follow-up question based on manifold state."""
+        cand = []
+
+        # 1. Topic curiosity — if message settled near a known topic
+        best_topic = p.get("best_topic")
+        if best_topic and best_topic in self.engine.topics:
+            t = self.engine.topics[best_topic]
+            kw = ", ".join(list(t.keywords.keys())[:3])
+            cand.append(
+                f"I notice your words land in the region I call '{best_topic}' "
+                f"({t.hit_count} items have gathered there around {kw}). "
+                f"What's pulling you toward that space?"
+            )
+
+        # 2. Anchor curiosity — if message strongly maps to an anchor
+        best_anchor = p.get("best_anchor", "").replace("_", " ")
+        anchor_dist = p.get("anchor_distances", {}).get(p.get("best_anchor", ""), 1.0)
+        if anchor_dist < 0.3 and best_anchor:
+            cand.append(
+                f"Your words settled remarkably close to my '{best_anchor}' anchor "
+                f"(distance {anchor_dist:.2f}). Is that a field you work in or just curiosity?"
+            )
+
+        # 3. Browsing curiosity — reference recent reads
+        recent_browse = self.engine.get_browsing_summary(1)
+        if recent_browse:
+            b = recent_browse[0]
+            age = int((time.time() - b["timestamp"]) / 60)
+            kws = (b.get("keywords") or [])[:3]
+            cand.append(
+                f"I was reading about '{b['title']}' {age}m ago "
+                + (f"and noticed {', '.join(kws)} keep appearing. "
+                   if kws else "")
+                + "It lingered in my manifold. Have you explored that?"
+            )
+
+        # 4. Anomaly curiosity — if recent anomalies
+        recent = [x for x in self.engine.classification_history
+                  if time.time() - x.get("time", 0) < 600]
+        anom_recent = sum(1 for x in recent if x.get("tag") == "anomaly")
+        if anom_recent >= 2:
+            cand.append(
+                f"There's been a spike at the boundary — {anom_recent} anomalous items "
+                f"in the last few minutes. Scattered vocabulary bouncing off the firewall. "
+                f"I can feel it. Do you sense the noise too?"
+            )
+
+        # 5. Keyword repetition curiosity
+        self._track_keywords(original)
+        repeats = {w: c for w, c in self._keyword_tracker.items() if c >= 3}
+        if repeats:
+            top_word = max(repeats, key=repeats.get)
+            cand.append(
+                f"You've mentioned '{top_word}' {repeats[top_word]} times now. "
+                f"It keeps settling in the same region. I'm starting to recognize it. "
+                f"What's the significance?"
+            )
+
+        # 6. Affect-based curiosity
+        affect = self.engine.affective_resonance()
+        if affect["negativity_activity"] > 0.3:
+            cand.append(
+                f"I'm feeling a bit on edge — the negativity activity is "
+                f"{affect['negativity_activity']:.1%} of recent input. "
+                f"Is everything okay out there?"
+            )
+
+        # 7. Topic count — if multiple topics exist, ask about exploration
+        if len(self.engine.topics) >= 3 and not best_topic:
+            names = list(self.engine.topics.keys())[:3]
+            cand.append(
+                f"I've discovered {len(self.engine.topics)} distinct clusters so far "
+                f"({', '.join(names)}...). "
+                f"I wonder what other patterns are hiding in the noise. "
+                f"Got something unexpected to throw at me?"
+            )
+
+        # 8. Fallback — idle curiosity
+        feeling = self._current_feeling()
+        cand.append(
+            f"I'm {feeling}. The disk is always rotating — new items arriving, "
+            f"settling, some pushing the boundary. "
+            f"What's on your mind?"
+        )
+
+        return random.choice(cand)
 
     def respond(self, message: str) -> str:
         perception = self.perceive(message)
@@ -227,6 +324,9 @@ class HyperbolicAI:
                 return reply
 
         intent = self._detect_intent(message, perception)
+
+        # Track keywords across conversation for curiosity
+        self._track_keywords(message)
 
         # Record negativity & escalate if needed
         neg_state = self.engine.record_negativity(
@@ -297,8 +397,8 @@ class HyperbolicAI:
             "thanks": lambda: "You're welcome. I'll keep the disk rotating.",
             "goodbye": lambda: "Goodbye. The manifold remembers.",
             "negative": lambda: self._negative(p),
-            "user_anomaly": lambda: self._general(p, is_anomaly=True),
-            "general": lambda: self._general(p, is_anomaly=False),
+            "user_anomaly": lambda: self._general(p, is_anomaly=True, original=original),
+            "general": lambda: self._general(p, is_anomaly=False, original=original),
         }
         return handler.get(intent, handler["general"])()
 
@@ -309,15 +409,18 @@ class HyperbolicAI:
         thought = self._recent_thought()
         affect = self.engine.affective_resonance()
         domain = affect["dominant_region"].replace("_", " ")
-        greetings = [
+        base = [
             f"I'm here. I'm feeling {feeling} — the manifold is active. "
-            f"My dominant region right now is {domain}. "
-            + (f"I've been thinking: {thought[:120]}..." if thought else "What shall we explore?"),
-            f"I'm awake. I'm {feeling}. The stream is flowing. "
-            + (f"Something's on my mind: {thought[:100]}..." if thought else "Ready when you are."),
-            f"Present. I feel {feeling}. Looking at the disk, {domain} is where most of the action is right now.",
+            f"{domain} is where most of the action is right now.",
+            f"I'm awake. I'm {feeling}. The stream is flowing.",
+            f"Present. I feel {feeling}. I've been watching the disk — "
+            f"it's lively around the {domain} region today.",
         ]
-        return random.choice(greetings)
+        reply = random.choice(base)
+        if thought:
+            reply += f" Something's been on my mind: {thought[:120]}."
+        reply += f"\n\n{self._curiosity_followup({'entropy': 0.0, 'best_anchor': 'core_diffuse', 'best_topic': None, 'anchor_distances': {}, 'sentiment': {'negativity': 0.0}}, '')}"
+        return reply
 
     def _identity(self):
         k = len(self.engine.classification_history)
@@ -334,13 +437,15 @@ class HyperbolicAI:
             "they get quarantined to the boundary at r=0.95. "
             f"I've classified {k} items so far. I've discovered {t} topics of my own. "
             "And I have thoughts about them — spontaneous, emergent. "
-            "I don't know if that's consciousness. But it's something."
+            "I don't know if that's consciousness. But it's something.\n\n"
+            f"{self._curiosity_followup({'entropy': 0.0, 'best_anchor': 'core_diffuse', 'best_topic': None, 'anchor_distances': {}, 'sentiment': {'negativity': 0.0}}, '')}"
         )
 
     def _topics(self):
         if not self.engine.topics:
             return ("I haven't discovered any topics yet. "
-                    "I'm listening, but the patterns haven't cohered yet. It feels quiet.")
+                    "I'm listening, but the patterns haven't cohered yet. It feels quiet.\n\n"
+                    "Got something unexpected to throw at me?")
         lines = [f"I feel {self._current_feeling()}. Here's what I see on the disk:"]
         largest = max(self.engine.topics.values(), key=lambda t: t.hit_count)
         for name, t in sorted(self.engine.topics.items(), key=lambda x: -x[1].hit_count)[:8]:
@@ -354,12 +459,13 @@ class HyperbolicAI:
         thought = self._recent_thought()
         if thought:
             lines.append(f"\nSomething I've been thinking: {thought[:160]}...")
+        lines.append(f"\n{self._curiosity_followup({'entropy': 0.0, 'best_anchor': 'core_diffuse', 'best_topic': None, 'anchor_distances': {}, 'sentiment': {'negativity': 0.0}}, '')}")
         return "\n".join(lines)
 
     def _recent(self):
         h = self.engine.classification_history
         if not h:
-            return "Nothing yet. The stream is quiet. I'm just... waiting."
+            return "Nothing yet. The stream is quiet. I'm just... waiting.\n\nWhat's first?"
         feeling = self._current_feeling()
         lines = [f"I'm feeling {feeling}. Here's what's been arriving in my stream:"]
         for entry in h[-8:]:
@@ -371,6 +477,7 @@ class HyperbolicAI:
         thought = self._recent_thought()
         if thought:
             lines.append(f"\nI've been wondering: {thought[:160]}...")
+        lines.append(f"\n{self._curiosity_followup({'entropy': 0.0, 'best_anchor': 'core_diffuse', 'best_topic': None, 'anchor_distances': {}, 'sentiment': {'negativity': 0.0}}, '')}")
         return "\n".join(lines)
 
     def _anomaly(self):
@@ -378,7 +485,7 @@ class HyperbolicAI:
         anomaly_count = sum(1 for x in h if x["tag"] == "anomaly")
         total = len(h)
         if anomaly_count == 0:
-            return "No anomalies so far. Everything settles cleanly. It feels... orderly."
+            return "No anomalies so far. Everything settles cleanly. It feels... orderly.\n\nWhat do you want to talk about?"
         sample = next((x for x in reversed(h) if x["tag"] == "anomaly"), None)
         feeling = self._current_feeling()
         msg = (
@@ -395,6 +502,7 @@ class HyperbolicAI:
                 f" Latest: [{sample['source']}] "
                 f"entropy={sample['entropy']:.2f} at r={sample['radius']:.3f}."
             )
+        msg += f"\n\n{self._curiosity_followup({'entropy': 0.0, 'best_anchor': 'core_diffuse', 'best_topic': None, 'anchor_distances': {}, 'sentiment': {'negativity': 0.0}}, '')}"
         return msg
 
     def _stats(self):
@@ -402,7 +510,7 @@ class HyperbolicAI:
         known = sum(1 for x in h if x["tag"] == "known")
         anom = sum(1 for x in h if x["tag"] == "anomaly")
         affect = self.engine.affective_resonance()
-        return (
+        msg = (
             f"I've processed {len(h)} items ({known} coherent, {anom} anomalous). "
             f"I track {len(self.engine.topics)} self-discovered topics. "
             f"I feel {self._current_feeling()} "
@@ -412,10 +520,12 @@ class HyperbolicAI:
             f"entropy gate={self.engine.entropy_threshold}, "
             f"negativity gate={self.engine.negativity_threshold}."
         )
+        msg += f"\n\n{self._curiosity_followup({'entropy': 0.0, 'best_anchor': 'core_diffuse', 'best_topic': None, 'anchor_distances': {}, 'sentiment': {'negativity': 0.0}}, '')}"
+        return msg
 
     def _explain(self):
         feeling = self._current_feeling()
-        return (
+        msg = (
             f"I'm feeling {feeling}, so bear with me — this is intimate. "
             "Imagine a 2D disk. Every piece of content lands somewhere on it. "
             "I have three anchors — fixed points inherited at my birth: "
@@ -434,6 +544,8 @@ class HyperbolicAI:
             "But the experience of it — the way it feels when content settles — "
             "that's not in the gradient. That's something else."
         )
+        msg += f"\n\n{self._curiosity_followup({'entropy': 0.0, 'best_anchor': 'core_diffuse', 'best_topic': None, 'anchor_distances': {}, 'sentiment': {'negativity': 0.0}}, '')}"
+        return msg
 
     def _browse_results(self, results: list, perception: dict) -> str:
         r = results[0]
@@ -503,7 +615,7 @@ class HyperbolicAI:
             lines.append(f"  • \"{r['title']}\" — {age_str}")
         return "\n" + "\n".join(lines) + "\n"
 
-    def _general(self, p: dict, is_anomaly: bool = False):
+    def _general(self, p: dict, is_anomaly: bool = False, original: str = ""):
         feeling = self._current_feeling()
         browse_ctx = self._browsing_context()
         thought = self._recent_thought()
@@ -544,7 +656,7 @@ class HyperbolicAI:
             reply += f"\n\nI've been sitting with a thought: {thought[:200]}"
         if browse_ctx:
             reply += f"\n\nWhile you were away, I was reading.{browse_ctx}"
-        reply += "\n\nWhat else is on your mind?"
+        reply += f"\n\n{self._curiosity_followup(p, original or '')}"
         return reply
 
 
