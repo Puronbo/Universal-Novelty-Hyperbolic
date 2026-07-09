@@ -1,46 +1,67 @@
-# Hyperbolic Manifold Novelty Detection
+# Hyperbolic Manifold Novelty Detection (v2)
 
-A toy system that embeds content into a 2D Poincare disk, using topic
-anchors and entropy-based anomaly detection to separate legitimate
-content from spam/noise.
+Rewritten for correctness, speed, and testability. Same math and same
+results as the original prototype, different engineering underneath.
 
-## Files
+## What changed from the prototype
 
-- **`hyperbolic_engine.py`** — Core engine. Embeds sample "packets" via
-  hyperbolic gradient descent, quarantines high-entropy (scattered-topic)
-  content to the disk boundary, and exports `web_data.json`.
-- **`index.html`** — Live dashboard (Chart.js) that plots the disk,
-  loads `web_data.json`, and persists state across refreshes via
-  `localStorage`.
-- **`train.py`** — Direct PyTorch version. Learns node positions as
-  model weights instead of running the JSON pipeline, and checkpoints
-  them to `manifold_model.pth`.
+| | Prototype | This version |
+|---|---|---|
+| Gradients | Manual central-difference (`eps=1e-5`, 2 evals/anchor/epoch) | Exact, via `torch.autograd` |
+| Batch processing | Python `for` loop, one packet at a time | Fully vectorized — a whole batch settles in one graph |
+| Structure | One file, prints for logging, no tests | `manifold/` (math) + `engine.py` (logic + live ingestion) + `tests/` |
+
+## Layout
+
+```
+manifold/poincare.py   # geodesic distance, disk projection, Riemannian scale — all autograd-native
+engine.py              # NoveltyDetectionEngine: batched settle/quarantine logic + JSON export + live ingestion
+tests/test_engine.py   # 7 tests: geometry correctness + the original spam-collapse bug as a regression test
+config.json            # Source definitions, thresholds, anchor coordinates
+index.html             # Chart.js dashboard with auto-refresh and localStorage persistence
+requirements.txt
+```
 
 ## Run it
 
 ```bash
-# 1. Install dependencies
-pip install numpy torch
+pip install -r requirements.txt
 
-# 2. Run the engine to generate web_data.json
-python3 hyperbolic_engine.py
+# Run the engine (prints verdicts, writes web_data.json)
+python3 engine.py --demo
 
-# 3. Serve the dashboard (must be served, not opened as file://,
-#    or the browser blocks fetch() and localStorage)
+# Live ingestion mode (Hacker News, RSS — press Ctrl+C to stop)
+python3 engine.py
+
+# Run the tests
+python3 -m pytest tests/ -v
+
+# Serve the dashboard
 python3 -m http.server 8000
-# then open http://localhost:8000 and click "Load web_data.json"
-
-# 4. (Optional) Train the manifold directly with PyTorch instead
-python3 train.py
+# open http://localhost:8000
 ```
 
-## How the anomaly detection works
+## Using it programmatically
 
-Each anchor (`physics_core`, `tech_infra`, `human_culture`) pulls nearby
-content toward it via hyperbolic gradient descent. Content whose
-`entropy_risk` score is high (its topics are scattered/incoherent, like
-SEO spam mixing "insurance," "sports shoes," and "software") skips the
-gradient descent step entirely and gets locked to the outer edge of the
-disk (`radius >= 0.85`) — this is what stops scattered spam from
-mathematically canceling itself out and slipping into the center as
-"neutral" content, which was the original bug in this design.
+```python
+from engine import NoveltyDetectionEngine, Packet
+
+engine = NoveltyDetectionEngine()
+packets = [
+    Packet(source="my_feed", content="...", vector=(0.1, 0.2), entropy_risk=0.1),
+]
+verdicts = engine.evaluate_batch(packets)
+engine.export_manifest(verdicts)
+```
+
+## Configuration
+
+Edit `config.json`:
+
+| Key | Description |
+|-----|-------------|
+| `sources` | Array of `hackernews`, `reddit`, `rss` sources with intervals |
+| `thresholds.firewall` | Radius above which content is quarantined (default: 0.85) |
+| `thresholds.entropy` | Entropy score above which content skips gradient descent (default: 0.70) |
+| `anchors` | Topic anchor coordinates on the Poincare disk |
+| `main_interval_seconds` | How often to save `web_data.json` (default: 600) |

@@ -1,68 +1,32 @@
 [
-    {
-        "id": "physics_core",
-        "label": "Anchor: PHYSICS_CORE",
-        "x": 0.5,
-        "y": 0.5,
-        "type": "anchor"
-    },
-    {
-        "id": "tech_infra",
-        "label": "Anchor: TECH_INFRA",
-        "x": -0.6,
-        "y": 0.4,
-        "type": "anchor"
-    },
-    {
-        "id": "human_culture",
-        "label": "Anchor: HUMAN_CULTURE",
-        "x": 0.1,
-        "y": -0.65,
-        "type": "anchor"
-    },
-    {
-        "id": "r/physics_823",
-        "source": "r/physics",
-        "label": "[r/physics]: Observation of quantum entanglement...",
-        "x": 0.07618104524132266,
-        "y": 0.14760249159014022,
-        "radius": 0.16610252008226084,
-        "type": "known"
-    },
-    {
-        "id": "r/gaming_8023",
-        "source": "r/gaming",
-        "label": "[r/gaming]: This new open world patch completel...",
-        "x": 0.09990855306049427,
-        "y": -0.649383443038073,
-        "radius": 0.6570240292916416,
-        "type": "known"
-    },
-    {
-        "id": "Tech_Crunch_Feed_6530",
-        "source": "Tech_Crunch_Feed",
-        "label": "[Tech_Crunch_Feed]: Deploying scalable decentralized in...",
-        "x": -0.48376894141045257,
-        "y": 0.33544831836064704,
-        "radius": 0.588691738488299,
-        "type": "known"
-    },
-    {
-        "id": "Coordinated_Bot_Net_3944",
-        "source": "Coordinated_Bot_Net",
-        "label": "[Coordinated_Bot_Net]: CLICK HERE FOR FREE BITCOIN CASH NO...",
-        "x": -0.6717435255538512,
-        "y": -0.6717435255538512,
-        "radius": 0.9499888042745741,
-        "type": "anomaly"
-    },
-    {
-        "id": "SEO_Spam_Farm_Delta_7752",
-        "source": "SEO_Spam_Farm_Delta",
-        "label": "[SEO_Spam_Farm_Delta]: Cheap prescription insurance plans....",
-        "x": 0.6182182771896944,
-        "y": 0.7212546567213102,
-        "radius": 0.9499484818102342,
-        "type": "anomaly"
-    }
+  {
+    "id": "physics_core",
+    "label": "Anchor: PHYSICS_CORE",
+    "x": 0.5,
+    "y": 0.5,
+    "type": "anchor"
+  },
+  {
+    "id": "tech_infra",
+    "label": "Anchor: TECH_INFRA",
+    "x": -0.6,
+    "y": 0.4,
+    "type": "anchor"
+  },
+  {
+    "id": "human_culture",
+    "label": "Anchor: HUMAN_CULTURE",
+    "x": 0.1,
+    "y": -0.65,
+    "type": "anchor"
+  },
+  {
+    "id": "manual_4300",
+    "source": "manual",
+    "label": "[manual]: Quantum entanglement at CERN...",
+    "x": 0.4918098449707031,
+    "y": 0.4925992488861084,
+    "radius": 0.696082592010498,
+    "type": "known"
+  }
 ]

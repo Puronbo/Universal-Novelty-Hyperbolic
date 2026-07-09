@@ -1,0 +1,27 @@
+{
+  "anchors": {
+    "physics_core": [0.50, 0.50],
+    "tech_infra": [-0.60, 0.40],
+    "human_culture": [0.10, -0.65]
+  },
+  "thresholds": {
+    "firewall": 0.85,
+    "entropy": 0.70
+  },
+  "sources": [
+    {
+      "type": "hackernews",
+      "limit": 5,
+      "interval_seconds": 60
+    },
+    {
+      "type": "rss",
+      "name": "TechCrunch",
+      "url": "https://techcrunch.com/feed/",
+      "limit": 3,
+      "interval_seconds": 180
+    }
+  ],
+  "main_interval_seconds": 300,
+  "output_file": "web_data.json"
+}

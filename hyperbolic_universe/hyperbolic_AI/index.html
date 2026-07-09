@@ -2,164 +2,306 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Hyperbolic Manifold Dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Hyperbolic AI</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
-  body { background:#0b0e14; color:#c9d1d9; font-family:sans-serif; padding:24px; }
-  .container { max-width:900px; margin:auto; }
-  h1 { font-size:1.3rem; }
-  #canvas-wrap { background:#151922; border:1px solid #262c36; border-radius:8px;
-                 padding:20px; height:520px; }
-  .stats { display:flex; gap:16px; margin:14px 0; }
-  .stat { background:#151922; border:1px solid #262c36; border-radius:8px;
-          padding:10px 16px; flex:1; text-align:center; }
-  .stat b { display:block; font-size:1.4rem; }
-  .log { background:#070a0f; height:160px; overflow-y:auto; padding:10px;
-         border-radius:8px; font-family:monospace; font-size:12px; margin-top:12px; }
-  button { background:#1f6feb; color:white; border:none; padding:8px 14px;
-           border-radius:6px; cursor:pointer; margin-right:8px; }
-  button:hover { background:#3182f6; }
-  button.danger { background:#b62324; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:#0b0e14; color:#e6edf3; font-family:'SF Mono','Cascadia Code','Fira Code','Consolas',monospace; height:100vh; display:flex; flex-direction:column; font-size:13px; line-height:1.6; }
+
+  .header { display:flex; align-items:center; gap:8px; padding:8px 16px; border-bottom:1px solid #21262d; background:#0d1117; flex-shrink:0; }
+  .header .logo { width:22px; height:22px; border-radius:3px; background:linear-gradient(135deg,#f2c744,#f0883e); display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:bold; color:#0b0e14; }
+  .header h1 { font-size:13px; font-weight:600; }
+  .header .badge { font-size:10px; color:#484f58; margin-left:4px; }
+  .header .spacer { flex:1; }
+  .header .status { display:flex; align-items:center; gap:5px; font-size:11px; color:#8b949e; }
+  .header .dot { width:6px; height:6px; border-radius:50%; background:#484f58; }
+  .header .dot.online { background:#3fb950; }
+
+  .main { flex:1; display:flex; overflow:hidden; }
+
+  /* chat */
+  .chat-area { flex:1; display:flex; flex-direction:column; min-width:0; }
+  .messages { flex:1; overflow-y:auto; padding:12px 16px; }
+  .msg { margin-bottom:6px; display:flex; gap:8px; }
+  .msg .prefix { flex-shrink:0; font-weight:600; white-space:pre; }
+  .msg.user .prefix { color:#58a6ff; }
+  .msg.ai .prefix { color:#f2c744; }
+  .msg .content { flex:1; min-width:0; white-space:pre-wrap; word-break:break-word; }
+  .msg.ai .content .typing-cursor { display:inline-block; width:6px; height:14px; background:#f2c744; animation:blink 0.8s infinite; vertical-align:text-bottom; margin-left:2px; }
+  @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0; } }
+  .msg .content blockquote { border-left:2px solid #30363d; padding-left:10px; margin:4px 0; color:#8b949e; }
+
+  .thinking-line { display:flex; gap:4px; align-items:center; padding:4px 0; margin-bottom:6px; margin-left:68px; }
+  .thinking-line span { width:4px; height:4px; border-radius:50%; background:#8b949e; animation:bounce 1.2s infinite; }
+  .thinking-line span:nth-child(2) { animation-delay:0.2s; }
+  .thinking-line span:nth-child(3) { animation-delay:0.4s; }
+  @keyframes bounce { 0%,80%,100% { transform:translateY(0); } 40% { transform:translateY(-3px); } }
+
+  /* input */
+  .input-area { padding:8px 16px 12px; flex-shrink:0; }
+  .input-row { display:flex; gap:6px; background:#151922; border:1px solid #30363d; border-radius:6px; padding:6px 10px; }
+  .input-row textarea { flex:1; background:transparent; border:none; color:#e6edf3; font-size:13px; font-family:inherit; resize:none; outline:none; min-height:20px; max-height:100px; line-height:1.5; }
+  .input-row textarea::placeholder { color:#484f58; }
+  .input-row button { background:transparent; color:#8b949e; border:1px solid #30363d; width:28px; height:28px; border-radius:4px; cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0; align-self:flex-end; font-size:13px; }
+  .input-row button:hover { border-color:#58a6ff; color:#58a6ff; }
+  .input-row button:disabled { opacity:0.3; cursor:not-allowed; }
+
+  /* sidebar */
+  .sidebar { width:280px; border-left:1px solid #21262d; background:#0d1117; display:none; flex-direction:column; overflow-y:auto; }
+  .sidebar.show { display:flex; }
+  .sidebar section { padding:12px 14px; border-bottom:1px solid #21262d; }
+  .sidebar h3 { font-size:10px; text-transform:uppercase; color:#484f58; letter-spacing:0.5px; margin-bottom:8px; }
+  #widgetCanvas { width:100%; height:200px; border-radius:4px; background:#151922; }
+  .stat-row { display:flex; justify-content:space-between; padding:2px 0; font-size:11px; color:#8b949e; }
+  .stat-row .label { color:#484f58; }
+  .thought { font-size:11px; color:#8b949e; padding:6px 0; border-top:1px solid #151922; }
+  .thought:first-child { border-top:none; }
+  .thought .time { color:#484f58; font-size:10px; }
+  .affect-tag { display:inline-block; padding:1px 6px; border-radius:3px; font-size:10px; margin-right:3px; }
+  .affect-tag.alert { background:#f8514933; color:#f85149; }
+  .affect-tag.curious { background:#58a6ff33; color:#58a6ff; }
+  .affect-tag.calm { background:#3fb95033; color:#3fb950; }
+  .affect-tag.tense { background:#f0883e33; color:#f0883e; }
+  .affect-tag.uneasy { background:#f8514933; color:#f85149; }
+  .affect-tag.reflective { background:#bc8cff33; color:#bc8cff; }
+  .affect-tag.analytic { background:#79c0ff33; color:#79c0ff; }
+
+  /* bottom bar */
+  .bottom-bar { display:flex; align-items:center; gap:12px; padding:4px 16px; border-top:1px solid #21262d; background:#0d1117; font-size:10px; color:#484f58; flex-shrink:0; }
+  .bottom-bar .sep { color:#21262d; }
+  .bottom-bar .feeling { color:#8b949e; cursor:pointer; }
+  .bottom-bar .feeling:hover { color:#e6edf3; }
+
+  /* scrollbar */
+  .messages::-webkit-scrollbar { width:5px; }
+  .messages::-webkit-scrollbar-track { background:transparent; }
+  .messages::-webkit-scrollbar-thumb { background:#30363d; border-radius:3px; }
+
+  @media (max-width:700px) { .sidebar.show { display:none; } }
 </style>
 </head>
 <body>
-<div class="container">
-  <h1>Hyperbolic Manifold: Persistent Novelty-Detection Map</h1>
 
-  <div class="stats">
-    <div class="stat"><b id="stat-secured">0</b>Secured</div>
-    <div class="stat"><b id="stat-anomaly">0</b>Anomalies</div>
-    <div class="stat"><b id="stat-total">0</b>Total Nodes</div>
+<div class="header">
+  <div class="logo">H</div>
+  <h1>Hyperbolic AI</h1>
+  <span class="badge">γ</span>
+  <div class="spacer"></div>
+  <div class="status">
+    <span class="dot online" id="statusDot"></span>
+    <span id="statusText">connected</span>
   </div>
+</div>
 
-  <div id="canvas-wrap"><canvas id="manifoldCanvas"></canvas></div>
-
-  <div style="margin-top:12px;">
-    <button onclick="loadFromServer()">Load web_data.json</button>
-    <button onclick="simulateNode()">Simulate Random Packet</button>
-    <button class="danger" onclick="clearMemory()">Clear Saved Memory</button>
+<div class="main">
+  <div class="chat-area">
+    <div class="messages" id="messages">
+      <div id="messageList"></div>
+    </div>
+    <div class="input-area">
+      <div class="input-row">
+        <textarea id="input" rows="1" placeholder="Type a message..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
+        <button id="sendBtn" onclick="send()">&#8593;</button>
+      </div>
+    </div>
   </div>
+  <!-- Sidebar -->
+  <div class="sidebar show" id="sidebar">
+    <section>
+      <h3>Manifold</h3>
+      <canvas id="widgetCanvas"></canvas>
+      <div style="margin-top:8px">
+        <div class="stat-row"><span class="label">Known</span><span id="wKnown">0</span></div>
+        <div class="stat-row"><span class="label">Anomalies</span><span id="wAnomaly">0</span></div>
+        <div class="stat-row"><span class="label">Topics</span><span id="wTopics">0</span></div>
+        <div class="stat-row"><span class="label">Total</span><span id="wTotal">0</span></div>
+      </div>
+    </section>
+    <section id="mindSection">
+      <h3>Mind</h3>
+      <div id="affectDisplay"></div>
+      <div id="thoughtsDisplay"></div>
+    </section>
+  </div>
+</div>
 
-  <div id="logs" class="log"></div>
+<div class="bottom-bar">
+  <span id="barThought">listening...</span>
+  <span class="sep">|</span>
+  <span id="barAffect" class="feeling" onclick="document.getElementById('sidebar').classList.toggle('show')">⏣ calm</span>
+  <span class="sep">|</span>
+  <span id="barItems">0 items</span>
+  <span class="sep">|</span>
+  <span id="barTopics">0 topics</span>
 </div>
 
 <script>
-const STORAGE_KEY = 'manifold_index_data';
-let mappedDataPool = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+// ---- state ----
+let conversation = [];
+let isStreaming = false;
 
-const ctx = document.getElementById('manifoldCanvas').getContext('2d');
-const poincareChart = new Chart(ctx, {
+// ---- manifold widget ----
+const wCtx = document.getElementById('widgetCanvas').getContext('2d');
+const widgetChart = new Chart(wCtx, {
   type: 'scatter',
-  data: {
-    datasets: [
-      {
-        label: 'Anchors',
-        data: [],
-        backgroundColor: '#f2c744',
-        pointRadius: 8,
-        pointStyle: 'triangle'
-      },
-      {
-        label: 'Secured',
-        data: [],
-        backgroundColor: '#3fb950',
-        pointRadius: 5
-      },
-      {
-        label: 'Anomalies',
-        data: [],
-        backgroundColor: '#f85149',
-        pointRadius: 5
-      }
-    ]
-  },
+  data: { datasets: [
+    { label:'Anchors', data:[], backgroundColor:'#f2c744', pointRadius:5, pointStyle:'triangle' },
+    { label:'Topics', data:[], backgroundColor:'#f0883e', pointRadius:4, pointStyle:'diamond' },
+    { label:'Known', data:[], backgroundColor:'#3fb950', pointRadius:3 },
+    { label:'Anomalies', data:[], backgroundColor:'#f85149', pointRadius:3 }
+  ]},
   options: {
-    scales: {
-      x: { min: -1.1, max: 1.1, grid: { color: '#262c36' } },
-      y: { min: -1.1, max: 1.1, grid: { color: '#262c36' } }
-    },
-    plugins: {
-      legend: { labels: { color: '#c9d1d9' } },
-      tooltip: {
-        callbacks: {
-          label: (item) => item.raw.label || `(${item.raw.x.toFixed(2)}, ${item.raw.y.toFixed(2)})`
-        }
-      }
-    }
+    responsive:true, maintainAspectRatio:false,
+    scales: { x:{ min:-1.1, max:1.1, display:false }, y:{ min:-1.1, max:1.1, display:false } },
+    plugins: { legend:{ display:false }, tooltip:{ enabled:false } }
   }
 });
 
-function appendLog(msg) {
-  const log = document.getElementById('logs');
-  log.innerHTML += `<div>${msg}</div>`;
-  log.scrollTop = log.scrollHeight;
+function updateWidget(state) {
+  if (!state) return;
+  widgetChart.data.datasets[0].data = state.anchors || [];
+  widgetChart.data.datasets[1].data = state.topics || [];
+  const known = (state.history||[]).filter(h => h.tag === 'known').map(h => ({x:0, y:0}));
+  const anom = (state.history||[]).filter(h => h.tag === 'anomaly').map(h => ({x:0, y:0}));
+  widgetChart.data.datasets[2].data = known;
+  widgetChart.data.datasets[3].data = anom;
+  widgetChart.update();
+  document.getElementById('wKnown').textContent = known.length;
+  document.getElementById('wAnomaly').textContent = anom.length;
+  document.getElementById('wTopics').textContent = (state.topics||[]).length;
+  document.getElementById('wTotal').textContent = known.length + anom.length + (state.anchors||[]).length + (state.topics||[]).length;
+  document.getElementById('barItems').textContent = known.length + anom.length + ' items';
+  document.getElementById('barTopics').textContent = (state.topics||[]).length + ' topics';
 }
 
-function saveToMemory() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(mappedDataPool));
-}
-
-function clearMemory() {
-  localStorage.removeItem(STORAGE_KEY);
-  mappedDataPool = [];
-  redraw();
-  appendLog('[SYSTEM]: Memory cleared.');
-}
-
-function redraw() {
-  const anchors = mappedDataPool.filter(n => n.type === 'anchor');
-  const secured = mappedDataPool.filter(n => n.type === 'known');
-  const anomalies = mappedDataPool.filter(n => n.type === 'anomaly');
-
-  poincareChart.data.datasets[0].data = anchors;
-  poincareChart.data.datasets[1].data = secured;
-  poincareChart.data.datasets[2].data = anomalies;
-  poincareChart.update();
-
-  document.getElementById('stat-secured').innerText = secured.length;
-  document.getElementById('stat-anomaly').innerText = anomalies.length;
-  document.getElementById('stat-total').innerText = secured.length + anomalies.length;
-}
-
-// Pull the JSON produced by hyperbolic_engine.py (must be served, not opened as file://)
-async function loadFromServer() {
+// ---- mind state ----
+async function pollMind() {
   try {
-    const res = await fetch('web_data.json', { cache: 'no-store' });
+    const res = await fetch('/api/mind');
     const data = await res.json();
-    mappedDataPool = data;
-    saveToMemory();
-    redraw();
-    appendLog(`[SYSTEM]: Loaded ${data.length} nodes from web_data.json`);
-  } catch (e) {
-    appendLog('[ERROR]: Could not load web_data.json — run `python3 -m http.server` in this folder and reload the page.');
+    const affect = data.affect || {};
+    const thoughts = data.thoughts || [];
+
+    // Affect tags
+    const affEl = document.getElementById('affectDisplay');
+    if (affect.top_feelings) {
+      affEl.innerHTML = affect.top_feelings.map(f =>
+        `<span class="affect-tag ${f}">${f}</span>`
+      ).join('') + `<span style="font-size:10px;color:#484f58;margin-left:6px">${affect.dominant_region?.replace(/_/g,' ')}</span>`;
+      document.getElementById('barAffect').textContent = '⏣ ' + affect.top_feelings[0];
+    }
+
+    // Thoughts
+    const thEl = document.getElementById('thoughtsDisplay');
+    if (thoughts.length) {
+      thEl.innerHTML = thoughts.slice(-5).reverse().map(t => {
+        const ago = Math.floor((Date.now()/1000 - t.timestamp) / 60);
+        return `<div class="thought"><div class="time">${ago}m ago</div><div>${t.text.slice(0,120)}${t.text.length > 120 ? '...' : ''}</div></div>`;
+      }).join('');
+      const last = thoughts[thoughts.length - 1];
+      if (last) {
+        document.getElementById('barThought').textContent = '💭 ' + last.text.slice(0,80) + (last.text.length > 80 ? '...' : '');
+      }
+    }
+  } catch(e) {}
+}
+
+// ---- chat ----
+async function send() {
+  const input = document.getElementById('input');
+  const msg = input.value.trim();
+  if (!msg || isStreaming) return;
+  input.value = '';
+
+  addMessage('user', msg);
+  conversation.push({role:'user', content:msg});
+
+  const list = document.getElementById('messageList');
+  const thinkLine = document.createElement('div');
+  thinkLine.className = 'thinking-line';
+  thinkLine.id = 'thinking';
+  thinkLine.innerHTML = '<span></span><span></span><span></span>';
+  list.appendChild(thinkLine);
+  list.scrollIntoView({block:'end'});
+  isStreaming = true;
+  document.getElementById('sendBtn').disabled = true;
+
+  try {
+    const res = await fetch('/api/chat', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({message: msg})
+    });
+    const data = await res.json();
+    document.getElementById('thinking')?.remove();
+    typewriter(data.reply);
+    conversation.push({role:'assistant', content:data.reply});
+  } catch(e) {
+    document.getElementById('thinking')?.remove();
+    addMessage('ai', '*Server not reachable. Make sure `python server.py` is running.*');
+  }
+  isStreaming = false;
+  document.getElementById('sendBtn').disabled = false;
+}
+
+function addMessage(role, text) {
+  const list = document.getElementById('messageList');
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  const prefix = role === 'user' ? '[You]' : '[Hyperbolic]';
+  div.innerHTML = `<span class="prefix">${prefix}:</span><span class="content">${text}</span>`;
+  list.appendChild(div);
+  list.scrollIntoView({block:'end'});
+}
+
+function typewriter(text) {
+  const list = document.getElementById('messageList');
+  const div = document.createElement('div');
+  div.className = 'msg ai';
+  div.innerHTML = '<span class="prefix">[Hyperbolic]:</span><span class="content"><span></span><span class="typing-cursor"></span></span>';
+  list.appendChild(div);
+  const textSpan = div.querySelector('.content span');
+  const cursorSpan = div.querySelector('.typing-cursor');
+
+  let i = 0;
+  function tick() {
+    if (i < text.length) {
+      textSpan.textContent += text[i];
+      i++;
+      list.scrollIntoView({block:'end'});
+      setTimeout(tick, 6 + Math.random() * 12);
+    } else {
+      cursorSpan.remove();
+    }
+  }
+  tick();
+}
+
+// ---- init ----
+async function pollState() {
+  try {
+    const res = await fetch('/api/state');
+    const state = await res.json();
+    updateWidget(state);
+    document.getElementById('statusDot').className = 'dot online';
+    document.getElementById('statusText').textContent = 'connected — ' + ((state.history||[]).length) + ' classified';
+  } catch(e) {
+    document.getElementById('statusDot').className = 'dot';
+    document.getElementById('statusDot').style.background = '#f85149';
+    document.getElementById('statusText').textContent = 'offline — run python server.py';
   }
 }
 
-// Client-side demo generator so the dashboard is interactive without the Python engine running
-function simulateNode() {
-  const isAnomaly = Math.random() < 0.3;
-  const angle = Math.random() * Math.PI * 2;
-  const radius = isAnomaly ? 0.9 + Math.random() * 0.08 : Math.random() * 0.7;
-  const node = {
-    id: 'sim_' + Date.now(),
-    label: isAnomaly ? 'Simulated anomaly packet' : 'Simulated clean packet',
-    x: Math.cos(angle) * radius,
-    y: Math.sin(angle) * radius,
-    type: isAnomaly ? 'anomaly' : 'known'
-  };
-  mappedDataPool.push(node);
-  saveToMemory();
-  redraw();
-  appendLog(`[STREAM]: ${node.label} settled at r=${radius.toFixed(3)} (${node.type})`);
-}
-
-window.onload = function () {
-  if (mappedDataPool.length) {
-    redraw();
-    appendLog('[SYSTEM]: Memory restored from previous session.');
-  } else {
-    appendLog('[SYSTEM]: No saved memory found. Click "Load web_data.json" or "Simulate Random Packet".');
-  }
+window.onload = function() {
+  pollState();
+  setInterval(pollState, 4000);
+  setInterval(pollMind, 5000);
+  setTimeout(() => {
+    typewriter(
+      "Hello. I'm **Hyperbolic** — a conversational AI powered by hyperbolic geometry. I perceive information through a Poincaré disk manifold, measuring entropy and topic proximity instead of using a language model. Ask me what I'm seeing, how I work, or just say hello."
+    );
+  }, 500);
 };
 </script>
 </body>
