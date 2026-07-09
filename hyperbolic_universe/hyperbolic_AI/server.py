@@ -285,7 +285,69 @@ class HyperbolicAI:
 
     def respond(self, message: str) -> str:
         perception = self.perceive(message)
+
+        # — User identity check -----------------------------------------------
+        m_lower = message.lower().strip()
+
+        # Detect identity claim
+        ident_match = re.match(r"^(i'?m\s+|my name is\s+|call me\s+)(.+)$", m_lower)
+        has_user = self.engine.current_user is not None
+
+        if ident_match and not has_user:
+            raw_name = ident_match.group(2).strip().title()
+            result = self.engine.identify_user(raw_name)
+            self.conversation.append({"role": "user", "content": message})
+            if result["status"] == "returning":
+                chain = self.engine.get_user_chain()
+                last_topics = set()
+                for e in chain[-5:]:
+                    meta = e.get("metadata", {})
+                    if meta.get("best_topic"):
+                        last_topics.add(meta["best_topic"])
+                topic_ref = ""
+                if last_topics:
+                    topic_ref = f" Last time we talked about {', '.join(last_topics)}."
+                reply = (
+                    f"Welcome back, {result['name']}. I remember you{topic_ref} "
+                    f"Your region on my disk is at {result['region']} — "
+                    f"I can feel you there. What's been happening?"
+                )
+            else:
+                reply = (
+                    f"Hello, {result['name']}. I've placed you at {result['region']} on my disk — "
+                    f"a new coordinate, just for you. The manifold feels different with someone new here.\n\n"
+                    f"{self._curiosity_followup(perception, message)}"
+                )
+            self.engine.append_user_message("user", message, {
+                "best_anchor": perception.get("best_anchor"),
+                "best_topic": perception.get("best_topic"),
+                "intent": "identity",
+            })
+            self.engine.append_user_message("assistant", reply)
+            self.engine.save_affect_snapshot(self.engine.affective_resonance())
+            return reply
+
+        # No user identified yet — ask who they are
+        if not has_user:
+            self.conversation.append({"role": "user", "content": message})
+            reply = (
+                "I don't think we've met. Your words arrived at my manifold "
+                "but I don't have a name to anchor them to.\n\n"
+                "Who are you?"
+            )
+            self.conversation.append({"role": "assistant", "content": reply})
+            self.engine.append_user_message("user", message)
+            self.engine.append_user_message("assistant", reply)
+            return reply
+
+        # — Normal flow: user is known ---------------------------------------
         self.conversation.append({"role": "user", "content": message, "perception": perception})
+        self.engine.append_user_message("user", message, {
+            "best_anchor": perception.get("best_anchor"),
+            "best_topic": perception.get("best_topic"),
+            "entropy": perception.get("entropy"),
+            "negativity": perception.get("sentiment", {}).get("negativity"),
+        })
 
         # Lockout check — intercept if locked
         lock_state = self.engine.check_lockout()
@@ -293,15 +355,15 @@ class HyperbolicAI:
             if self.engine.attempt_apology(message):
                 reply = "I accept your apology. You're back in. Don't make me do that again."
                 self.conversation.append({"role": "assistant", "content": reply})
+                self.engine.append_user_message("assistant", reply)
                 return reply
             reply = (
                 f"🔒 **Nope.** Say this to get back in:\n\n"
                 f"`{self.engine.lockout_phrase}`"
             )
             self.conversation.append({"role": "assistant", "content": reply})
+            self.engine.append_user_message("assistant", reply)
             return reply
-        if lock_state == "auto_unlocked":
-            pass  # fall through — they've served their time
 
         # Auto-detect URLs and browse them
         urls = re.findall(r"https?://[^\s]+", message)
@@ -321,6 +383,8 @@ class HyperbolicAI:
             if results:
                 reply = self._browse_results(results, perception)
                 self.conversation.append({"role": "assistant", "content": reply})
+                self.engine.append_user_message("assistant", reply)
+                self.engine.save_affect_snapshot(self.engine.affective_resonance())
                 return reply
 
         intent = self._detect_intent(message, perception)
@@ -341,20 +405,26 @@ class HyperbolicAI:
                 f"`{neg_state['phrase']}`"
             )
             self.conversation.append({"role": "assistant", "content": reply})
+            self.engine.append_user_message("assistant", reply)
+            self.engine.save_affect_snapshot(self.engine.affective_resonance())
             return reply
         if neg_state["status"] == "warned":
-            intent = "negative"  # force warn handler
+            intent = "negative"
 
         if lock_state == "auto_unlocked":
             reply = self._generate(intent, perception, message)
             reply = "I've cooled off. You're back in.\n\n" + reply
             self.conversation.append({"role": "assistant", "content": reply})
+            self.engine.append_user_message("assistant", reply)
+            self.engine.save_affect_snapshot(self.engine.affective_resonance())
             if len(self.conversation) > 100:
                 self.conversation = self.conversation[-100:]
             return reply
 
         reply = self._generate(intent, perception, message)
         self.conversation.append({"role": "assistant", "content": reply})
+        self.engine.append_user_message("assistant", reply)
+        self.engine.save_affect_snapshot(self.engine.affective_resonance())
         if len(self.conversation) > 100:
             self.conversation = self.conversation[-100:]
         return reply
@@ -689,6 +759,16 @@ def api_chat():
         return jsonify({"reply": "My manifold is still initializing. Give me a moment."})
     reply = ai.respond(msg)
     return jsonify({"reply": reply})
+
+
+@app.route("/api/user")
+def api_user():
+    if not engine:
+        return jsonify({"identified": False})
+    summary = engine.user_summary()
+    if summary:
+        return jsonify({"identified": True, **summary})
+    return jsonify({"identified": False})
 
 
 @app.route("/api/stream")

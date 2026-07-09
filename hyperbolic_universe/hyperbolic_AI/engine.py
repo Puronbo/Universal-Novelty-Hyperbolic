@@ -341,11 +341,119 @@ class NoveltyDetectionEngine:
     lockout_expiry: float = 0.0
     negativity_streak: int = 0
     lockout_duration: float = 600.0  # auto-clear after 10m
+    users_db_path: str = "users_db.json"
+    current_user: str | None = None
 
     def __post_init__(self) -> None:
         self._anchor_names = list(self.anchors.keys())
         self._anchor_tensor = torch.tensor(list(self.anchors.values()), dtype=torch.float32)
+        self._users: dict[str, dict] = {}
+        self._load_users()
         logger.info("[SYSTEM STATUS]: Novelty detection engine online (%d anchors, auto_learn=%s)", len(self.anchors), self.auto_learn)
+
+    # -- Persistent user chain ------------------------------------------------
+
+    def _load_users(self) -> None:
+        path = Path(self.users_db_path)
+        if path.exists():
+            with open(path) as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    self._users = data
+                elif isinstance(data, list):
+                    self._users = {u["name"].lower(): u for u in data}
+            logger.info("[USERS]: loaded %d users", len(self._users))
+        else:
+            self._users = {}
+
+    def _save_users(self) -> None:
+        path = Path(self.users_db_path)
+        with open(path, "w") as f:
+            json.dump(self._users, f, indent=2)
+
+    def _user_region(self, name: str) -> tuple[float, float]:
+        h = hash(name.lower()) & 0xFFFFFFFF
+        angle = (h % 10000) / 10000 * 2 * math.pi
+        radius = 0.2 + (h % 3000) / 10000 * 0.5  # 0.2 - 0.7
+        return (round(radius * math.cos(angle), 4), round(radius * math.sin(angle), 4))
+
+    def identify_user(self, name: str) -> dict:
+        key = name.strip().lower()
+        now = time.time()
+        if key in self._users:
+            u = self._users[key]
+            u["last_seen_at"] = now
+            self.current_user = key
+            self._save_users()
+            return {"status": "returning", "name": u["name"], "region": u.get("region"), "chain_length": len(u.get("chain", []))}
+        else:
+            region = self._user_region(key)
+            self._users[key] = {
+                "name": name.strip(),
+                "created_at": now,
+                "last_seen_at": now,
+                "region": region,
+                "chain": [],
+                "affect_snapshots": [],
+            }
+            self.current_user = key
+            self._save_users()
+            return {"status": "new", "name": name.strip(), "region": region, "chain_length": 0}
+
+    def get_user_chain(self) -> list[dict]:
+        if not self.current_user or self.current_user not in self._users:
+            return []
+        return self._users[self.current_user].get("chain", [])
+
+    def append_user_message(self, role: str, content: str, metadata: dict | None = None) -> None:
+        if not self.current_user or self.current_user not in self._users:
+            return
+        entry = {
+            "role": role,
+            "content": content,
+            "timestamp": time.time(),
+        }
+        if metadata:
+            entry["metadata"] = {k: v for k, v in metadata.items() if isinstance(v, (str, int, float, bool, list))}
+        self._users[self.current_user]["chain"].append(entry)
+        max_chain = 200
+        if len(self._users[self.current_user]["chain"]) > max_chain:
+            self._users[self.current_user]["chain"] = self._users[self.current_user]["chain"][-max_chain:]
+        self._save_users()
+
+    def save_affect_snapshot(self, affect: dict) -> None:
+        if not self.current_user or self.current_user not in self._users:
+            return
+        self._users[self.current_user]["affect_snapshots"].append({
+            "time": time.time(),
+            "top_feelings": affect.get("top_feelings", []),
+            "dominant_region": affect.get("dominant_region", ""),
+            "intensity": affect.get("intensity", 0),
+        })
+        if len(self._users[self.current_user]["affect_snapshots"]) > 50:
+            self._users[self.current_user]["affect_snapshots"] = self._users[self.current_user]["affect_snapshots"][-50:]
+        self._save_users()
+
+    def user_summary(self) -> dict | None:
+        if not self.current_user or self.current_user not in self._users:
+            return None
+        u = self._users[self.current_user]
+        chain = u.get("chain", [])
+        topics_mentioned = {}
+        for entry in chain[-50:]:
+            if entry["role"] == "user":
+                words = re.findall(r"[a-zA-Z][a-zA-Z-]{3,}", entry["content"].lower())
+                for w in words:
+                    topics_mentioned[w] = topics_mentioned.get(w, 0) + 1
+        top_words = sorted(topics_mentioned.items(), key=lambda x: -x[1])[:8]
+        return {
+            "name": u["name"],
+            "region": u.get("region"),
+            "chain_length": len(chain),
+            "last_seen": u.get("last_seen_at", 0),
+            "common_words": [w for w, c in top_words if c >= 2],
+            "returning": len(chain) > 2,
+        }
 
     def _settle_toward_anchors(self, vectors: torch.Tensor) -> torch.Tensor:
         coords = vectors.clone().detach().requires_grad_(True)

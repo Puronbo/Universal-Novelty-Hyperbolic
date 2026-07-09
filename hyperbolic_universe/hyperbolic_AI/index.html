@@ -101,6 +101,7 @@
     <span class="dot online" id="statusDot"></span>
     <span id="statusText">connected</span>
     <span class="lockout-badge" id="lockoutBadge">🔒 LOCKED</span>
+  <span class="lockout-badge" id="userBadge" style="color:#3fb950;background:#3fb95011;border-color:#3fb95033;display:none;">👤</span>
   </div>
 </div>
 
@@ -334,11 +335,24 @@ function typewriter(text) {
 // ---- init ----
 async function pollState() {
   try {
-    const res = await fetch('/api/state');
-    const state = await res.json();
+    const [stateRes, userRes] = await Promise.all([
+      fetch('/api/state'),
+      fetch('/api/user')
+    ]);
+    const state = await stateRes.json();
+    const user = await userRes.json();
     updateWidget(state);
     document.getElementById('statusDot').className = 'dot online';
     document.getElementById('statusText').textContent = 'connected — ' + ((state.history||[]).length) + ' classified';
+    
+    // User badge
+    const userBadge = document.getElementById('userBadge');
+    if (user.identified) {
+      userBadge.textContent = '👤 ' + user.name;
+      userBadge.style.display = 'inline-flex';
+    } else {
+      userBadge.style.display = 'none';
+    }
   } catch(e) {
     document.getElementById('statusDot').className = 'dot';
     document.getElementById('statusDot').style.background = '#f85149';
@@ -352,7 +366,7 @@ window.onload = function() {
   setInterval(pollMind, 5000);
   setTimeout(() => {
     typewriter(
-      "Hello. I'm **Hyperbolic** — a conversational AI powered by hyperbolic geometry. I perceive information through a Poincaré disk manifold, measuring entropy and topic proximity instead of using a language model. Ask me what I'm seeing, how I work, or just say hello."
+      "Hello. I'm **Hyperbolic** — a conversational AI powered by hyperbolic geometry. I perceive information through a Poincaré disk manifold, measuring entropy and topic proximity instead of using a language model. You should tell me your name so I can remember you."
     );
   }, 500);
 };
