@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Hyperbolic AI</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
   * { box-sizing:border-box; margin:0; padding:0; }
   body { background:#0b0e14; color:#e6edf3; font-family:'SF Mono','Cascadia Code','Fira Code','Consolas',monospace; height:100vh; display:flex; flex-direction:column; font-size:13px; line-height:1.6; }
@@ -124,14 +123,33 @@
   <!-- Sidebar -->
   <div class="sidebar show" id="sidebar">
     <section>
-      <h3>Manifold</h3>
-      <canvas id="widgetCanvas"></canvas>
+      <h3>Three-Disk Overlay</h3>
+      <div style="position:relative">
+        <canvas id="widgetCanvas" width="252" height="252"></canvas>
+        <div id="diskLegend" style="position:absolute;top:4px;right:4px;font-size:9px;line-height:1.8;text-align:right;color:#8b949e;">
+          <span style="color:#f2c744">▲</span> anchor
+          <span style="color:#f0883e;margin-left:4px">◆</span> topic
+          <span style="color:#3fb950;margin-left:4px">●</span> known
+          <span style="color:#f85149;margin-left:4px">●</span> anomaly
+          <span style="color:#58a6ff;margin-left:4px">◎</span> user
+          <span style="color:#bc8cff;margin-left:4px">✦</span> self
+        </div>
+      </div>
       <div style="margin-top:8px">
         <div class="stat-row"><span class="label">Known</span><span id="wKnown">0</span></div>
         <div class="stat-row"><span class="label">Anomalies</span><span id="wAnomaly">0</span></div>
         <div class="stat-row"><span class="label">Topics</span><span id="wTopics">0</span></div>
-        <div class="stat-row"><span class="label">Total</span><span id="wTotal">0</span></div>
+        <div class="stat-row"><span class="label">Users</span><span id="wUsers">0</span></div>
+        <div class="stat-row"><span class="label">Self Events</span><span id="wSelf">0</span></div>
       </div>
+    </section>
+    <section id="overlapsSection" style="display:none">
+      <h3>User Bridges</h3>
+      <div id="overlapsDisplay"></div>
+    </section>
+    <section id="dreamsSection" style="display:none">
+      <h3>Dreams</h3>
+      <div id="dreamsDisplay"></div>
     </section>
     <section id="mindSection">
       <h3>Mind</h3>
@@ -155,39 +173,142 @@
 // ---- state ----
 let conversation = [];
 let isStreaming = false;
+let diskData = null;
 
-// ---- manifold widget ----
-const wCtx = document.getElementById('widgetCanvas').getContext('2d');
-const widgetChart = new Chart(wCtx, {
-  type: 'scatter',
-  data: { datasets: [
-    { label:'Anchors', data:[], backgroundColor:'#f2c744', pointRadius:5, pointStyle:'triangle' },
-    { label:'Topics', data:[], backgroundColor:'#f0883e', pointRadius:4, pointStyle:'diamond' },
-    { label:'Known', data:[], backgroundColor:'#3fb950', pointRadius:3 },
-    { label:'Anomalies', data:[], backgroundColor:'#f85149', pointRadius:3 }
-  ]},
-  options: {
-    responsive:true, maintainAspectRatio:false,
-    scales: { x:{ min:-1.1, max:1.1, display:false }, y:{ min:-1.1, max:1.1, display:false } },
-    plugins: { legend:{ display:false }, tooltip:{ enabled:false } }
+// ---- Poincaré disk canvas ----
+const canvas = document.getElementById('widgetCanvas');
+const ctx = canvas.getContext('2d');
+const S = 116; // scale factor: half of canvas minus padding
+const CX = 126, CY = 126;
+
+function toScreen(x, y) {
+  return [CX + x * S, CY - y * S];
+}
+
+function drawDisk() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // --- Disk boundary ---
+  ctx.beginPath();
+  ctx.arc(CX, CY, S, 0, 2 * Math.PI);
+  ctx.strokeStyle = '#30363d';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Concentric guide rings
+  for (let r of [0.25, 0.5, 0.75]) {
+    ctx.beginPath();
+    ctx.arc(CX, CY, S * r, 0, 2 * Math.PI);
+    ctx.strokeStyle = '#151922';
+    ctx.lineWidth = 1;
+    ctx.stroke();
   }
-});
 
-function updateWidget(state) {
-  if (!state) return;
-  widgetChart.data.datasets[0].data = state.anchors || [];
-  widgetChart.data.datasets[1].data = state.topics || [];
-  const known = (state.history||[]).filter(h => h.tag === 'known').map(h => ({x:0, y:0}));
-  const anom = (state.history||[]).filter(h => h.tag === 'anomaly').map(h => ({x:0, y:0}));
-  widgetChart.data.datasets[2].data = known;
-  widgetChart.data.datasets[3].data = anom;
-  widgetChart.update();
-  document.getElementById('wKnown').textContent = known.length;
-  document.getElementById('wAnomaly').textContent = anom.length;
-  document.getElementById('wTopics').textContent = (state.topics||[]).length;
-  document.getElementById('wTotal').textContent = known.length + anom.length + (state.anchors||[]).length + (state.topics||[]).length;
-  document.getElementById('barItems').textContent = known.length + anom.length + ' items';
-  document.getElementById('barTopics').textContent = (state.topics||[]).length + ' topics';
+  if (!diskData) return;
+
+  // --- Data Disk: history items ---
+  const history = diskData.history || [];
+  for (const h of history) {
+    const c = h.coords;
+    if (!c) continue;
+    const [sx, sy] = toScreen(c[0], c[1]);
+    ctx.beginPath();
+    ctx.arc(sx, sy, 2.5, 0, 2 * Math.PI);
+    ctx.fillStyle = h.tag === 'anomaly' ? '#f85149' : '#3fb950';
+    ctx.globalAlpha = 0.6;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // --- User Disk: user regions ---
+  const users = diskData.users || [];
+  for (const u of users) {
+    const reg = u.region;
+    if (!reg) continue;
+    const [sx, sy] = toScreen(reg[0], reg[1]);
+    ctx.beginPath();
+    ctx.arc(sx, sy, 6, 0, 2 * Math.PI);
+    ctx.strokeStyle = '#58a6ff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = '#58a6ff22';
+    ctx.fill();
+    ctx.fillStyle = '#58a6ff';
+    ctx.font = '9px monospace';
+    ctx.fillText(u.name.substring(0, 8), sx + 8, sy + 3);
+  }
+
+  // --- Self Disk: self-chain events ---
+  const selfChain = diskData.self_chain || [];
+  for (const e of selfChain) {
+    // Place self events at random nearby positions determined by type
+    const hash = (s) => { let h=0; for(let i=0;i<s.length;i++) h=((h<<5)-h)+s.charCodeAt(i); return h; };
+    const h = hash(e.type + (e.text||''));
+    const angle = (h % 10000) / 10000 * 2 * Math.PI;
+    const radius = 0.3 + (h % 5000) / 10000 * 0.5;
+    const [sx, sy] = toScreen(radius * Math.cos(angle), radius * Math.sin(angle));
+    ctx.beginPath();
+    ctx.arc(sx, sy, 3, 0, 2 * Math.PI);
+    ctx.fillStyle = '#bc8cff';
+    ctx.globalAlpha = 0.7;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    // Glow
+    ctx.shadowColor = '#bc8cff';
+    ctx.shadowBlur = 6;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // --- Topics ---
+  const topics = diskData.topics || [];
+  for (const t of topics) {
+    const [sx, sy] = toScreen(t.x, t.y);
+    // Diamond shape
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - 5);
+    ctx.lineTo(sx + 4, sy);
+    ctx.lineTo(sx, sy + 5);
+    ctx.lineTo(sx - 4, sy);
+    ctx.closePath();
+    ctx.fillStyle = '#f0883e';
+    ctx.fill();
+    ctx.strokeStyle = '#f0883e';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // --- Anchors ---
+  const anchors = diskData.anchors || [];
+  for (const a of anchors) {
+    const [sx, sy] = toScreen(a.x, a.y);
+    // Triangle
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - 6);
+    ctx.lineTo(sx + 5, sy + 4);
+    ctx.lineTo(sx - 5, sy + 4);
+    ctx.closePath();
+    ctx.fillStyle = '#f2c744';
+    ctx.fill();
+    ctx.fillStyle = '#f2c744';
+    ctx.font = '9px monospace';
+    ctx.fillText(a.id.replace('Anchor: ', '').substring(0, 12).toUpperCase(), sx - 20, sy - 10);
+  }
+}
+
+function updateWidget() {
+  drawDisk();
+  if (!diskData) return;
+  const history = diskData.history || [];
+  const known = history.filter(h => h.tag === 'known').length;
+  const anom = history.filter(h => h.tag === 'anomaly').length;
+  document.getElementById('wKnown').textContent = known;
+  document.getElementById('wAnomaly').textContent = anom;
+  document.getElementById('wTopics').textContent = (diskData.topics||[]).length;
+  document.getElementById('wUsers').textContent = (diskData.users||[]).length;
+  document.getElementById('wSelf').textContent = (diskData.self_chain||[]).length;
+  document.getElementById('barItems').textContent = known + anom + ' items';
+  document.getElementById('barTopics').textContent = (diskData.topics||[]).length + ' topics';
 }
 
 // ---- mind state ----
@@ -228,8 +349,11 @@ function updateLockout(lockout) {
 
 async function pollMind() {
   try {
-    const res = await fetch('/api/mind');
-    const data = await res.json();
+    const [mindRes, diskRes] = await Promise.all([
+      fetch('/api/mind'),
+      fetch('/api/disk')
+    ]);
+    const data = await mindRes.json();
     const affect = data.affect || {};
     const thoughts = data.thoughts || [];
     const lockout = data.lockout || {};
@@ -257,6 +381,32 @@ async function pollMind() {
       if (last) {
         document.getElementById('barThought').textContent = '💭 ' + last.text.slice(0,80) + (last.text.length > 80 ? '...' : '');
       }
+    }
+
+    // Disk overlay data + overlaps
+    const disk = await diskRes.json();
+    diskData = disk;
+    drawDisk();
+    document.getElementById('wKnown').textContent = (disk.history||[]).filter(h => h.tag === 'known').length;
+    document.getElementById('wAnomaly').textContent = (disk.history||[]).filter(h => h.tag === 'anomaly').length;
+    document.getElementById('wTopics').textContent = (disk.topics||[]).length;
+    document.getElementById('wUsers').textContent = (disk.users||[]).length;
+    document.getElementById('wSelf').textContent = (disk.self_chain||[]).length;
+    document.getElementById('barItems').textContent = ((disk.history||[]).length) + ' items';
+    document.getElementById('barTopics').textContent = (disk.topics||[]).length + ' topics';
+
+    // User overlaps
+    const ovRes = await fetch('/api/user_overlaps');
+    const ov = await ovRes.json();
+    const ovSection = document.getElementById('overlapsSection');
+    const ovDisplay = document.getElementById('overlapsDisplay');
+    if (ov.length > 0) {
+      ovSection.style.display = '';
+      ovDisplay.innerHTML = ov.map(o =>
+        `<div class="thought"><div class="time">${o.user_a} ↔ ${o.user_b}</div><div style="color:#8b949e;font-size:10px"># ${o.common_words.slice(0,5).join(', ')}</div></div>`
+      ).join('');
+    } else {
+      ovSection.style.display = 'none';
     }
   } catch(e) {}
 }
@@ -335,15 +485,16 @@ function typewriter(text) {
 // ---- init ----
 async function pollState() {
   try {
-    const [stateRes, userRes] = await Promise.all([
-      fetch('/api/state'),
+    const [diskRes, userRes] = await Promise.all([
+      fetch('/api/disk'),
       fetch('/api/user')
     ]);
-    const state = await stateRes.json();
+    const disk = await diskRes.json();
     const user = await userRes.json();
-    updateWidget(state);
+    diskData = disk;
+    drawDisk();
     document.getElementById('statusDot').className = 'dot online';
-    document.getElementById('statusText').textContent = 'connected — ' + ((state.history||[]).length) + ' classified';
+    document.getElementById('statusText').textContent = 'connected — ' + ((disk.history||[]).length) + ' classified';
     
     // User badge
     const userBadge = document.getElementById('userBadge');
@@ -360,10 +511,30 @@ async function pollState() {
   }
 }
 
+// ---- SSE for real-time dreams / thoughts ----
+function connectSSE() {
+  const evtSource = new EventSource('/api/stream');
+  evtSource.onmessage = function(e) {
+    try {
+      const evt = JSON.parse(e.data);
+      if (evt.type === 'dream' && evt.dream) {
+        const d = evt.dream.data || {};
+        const dreamEl = document.getElementById('dreamsDisplay');
+        const section = document.getElementById('dreamsSection');
+        section.style.display = '';
+        const text = (d.text || '').slice(0, 100);
+        dreamEl.innerHTML = `<div class="thought"><div class="time">just now</div><div style="color:#bc8cff">${text}</div></div>` + dreamEl.innerHTML;
+        if (dreamEl.children.length > 5) dreamEl.removeChild(dreamEl.lastChild);
+      }
+    } catch(e) {}
+  };
+}
+
 window.onload = function() {
   pollState();
   setInterval(pollState, 4000);
   setInterval(pollMind, 5000);
+  connectSSE();
   setTimeout(() => {
     typewriter(
       "Hello. I'm **Hyperbolic** — a conversational AI powered by hyperbolic geometry. I perceive information through a Poincaré disk manifold, measuring entropy and topic proximity instead of using a language model. You should tell me your name so I can remember you."

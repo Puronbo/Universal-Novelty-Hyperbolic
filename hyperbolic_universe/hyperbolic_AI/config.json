@@ -9,6 +9,12 @@
     "entropy": 0.70,
     "negativity": 0.70
   },
+  "personality": {
+    "curiosity_drive": 0.6,
+    "volatility": 0.4,
+    "forgiveness_rate": 0.5,
+    "talkativeness": 0.5
+  },
   "sources": [
     {
       "type": "hackernews",
@@ -24,5 +30,6 @@
     }
   ],
   "main_interval_seconds": 300,
+  "dream_interval_seconds": 300,
   "output_file": "web_data.json"
 }

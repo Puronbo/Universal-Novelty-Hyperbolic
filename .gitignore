@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+.coverage
+
+# Node
+node_modules/
+package-lock.json
+package.json
+public/
+server.js
+App.js
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local data
+*.json
+!config.json
+web_data.json
+users_db.json
+self_chain.json
+files.zip
+
+# Folders
+"New folder*"

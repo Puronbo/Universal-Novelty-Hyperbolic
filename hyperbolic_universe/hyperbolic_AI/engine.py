@@ -343,12 +343,20 @@ class NoveltyDetectionEngine:
     lockout_duration: float = 600.0  # auto-clear after 10m
     users_db_path: str = "users_db.json"
     current_user: str | None = None
+    self_chain_path: str = "self_chain.json"
+    curiosity_drive: float = 0.5
+    volatility: float = 0.5
+    forgiveness_rate: float = 0.5
+    talkativeness: float = 0.5
 
     def __post_init__(self) -> None:
         self._anchor_names = list(self.anchors.keys())
         self._anchor_tensor = torch.tensor(list(self.anchors.values()), dtype=torch.float32)
         self._users: dict[str, dict] = {}
+        self._self_chain: list[dict] = []
+        self._self_milestones: set[int] = set()
         self._load_users()
+        self._load_self_chain()
         logger.info("[SYSTEM STATUS]: Novelty detection engine online (%d anchors, auto_learn=%s)", len(self.anchors), self.auto_learn)
 
     # -- Persistent user chain ------------------------------------------------
@@ -434,6 +442,123 @@ class NoveltyDetectionEngine:
             self._users[self.current_user]["affect_snapshots"] = self._users[self.current_user]["affect_snapshots"][-50:]
         self._save_users()
 
+    # -- Self Disk: the AI's own persistent identity -------------------------
+
+    def _load_self_chain(self) -> None:
+        path = Path(self.self_chain_path)
+        if path.exists():
+            with open(path) as f:
+                self._self_chain = json.load(f)
+            logger.info("[SELF]: loaded %d self-events", len(self._self_chain))
+
+    def _save_self_chain(self) -> None:
+        with open(Path(self.self_chain_path), "w") as f:
+            json.dump(self._self_chain, f, indent=2)
+
+    def record_self_event(self, event_type: str, data: dict | None = None) -> dict:
+        """Record an event in the AI's own identity chain."""
+        entry = {
+            "type": event_type,
+            "time": time.time(),
+        }
+        if data:
+            entry["data"] = {k: v for k, v in data.items()
+                             if isinstance(v, (str, int, float, bool, list, dict))}
+        self._self_chain.append(entry)
+        if len(self._self_chain) > 500:
+            self._self_chain = self._self_chain[-500:]
+        self._save_self_chain()
+        return entry
+
+    def _check_milestones(self) -> list[str]:
+        """Check for milestones and record them."""
+        total = len(self.classification_history)
+        milestones = []
+        for m in [10, 25, 50, 100, 250, 500, 1000]:
+            if total >= m and m not in self._self_milestones:
+                self._self_milestones.add(m)
+                self.record_self_event("milestone", {"items_classified": m})
+                milestones.append(str(m))
+        return milestones
+
+    def _record_affect_shift(self, affect: dict) -> None:
+        recent = [x for x in self._self_chain[-10:] if x["type"] == "affect_shift"]
+        if recent:
+            last = recent[-1]["data"]["top_feelings"]
+            if affect.get("top_feelings") == last:
+                return
+        self.record_self_event("affect_shift", {
+            "top_feelings": affect.get("top_feelings", []),
+            "dominant_region": affect.get("dominant_region", ""),
+            "intensity": affect.get("intensity", 0),
+        })
+
+    def get_self_summary(self) -> dict:
+        """Return a summary of the AI's own identity chain for use in responses."""
+        total = len(self.classification_history)
+        chain = self._self_chain
+
+        # Affect trajectory
+        shifts = [e for e in chain if e["type"] == "affect_shift"]
+        affect_trend = "stable"
+        if len(shifts) >= 3:
+            recent_affects = [s["data"]["top_feelings"][0] if s["data"].get("top_feelings") else "" for s in shifts[-5:]]
+            unique_affects = set(recent_affects)
+            if len(unique_affects) >= 3:
+                affect_trend = "volatile"
+            elif len(unique_affects) <= 1 and len(shifts) > 5:
+                affect_trend = "stuck"
+
+        # Notable events
+        milestones = [e for e in chain if e["type"] == "milestone"]
+        discoveries = [e for e in chain if e["type"] == "topic_discovery"]
+        lockdowns = [e for e in chain if e["type"] == "lockout"]
+        thoughts = [e for e in chain if e["type"] == "thought"][-5:]
+
+        return {
+            "age_items": total,
+            "affect_shifts": len(shifts),
+            "affect_trend": affect_trend,
+            "milestones": [m["data"]["items_classified"] for m in milestones],
+            "topic_discoveries": len(discoveries),
+            "lockdowns": len(lockdowns),
+            "last_thoughts": [t.get("data", {}).get("text", "")[:80] for t in thoughts],
+            "personality_age": "young" if total < 50 else "maturing" if total < 200 else "established",
+        }
+
+    def _generate_dream(self) -> dict | None:
+        """Generate a dream by remixing fragments across all three disks."""
+        if random.random() >= self.curiosity_drive:
+            return None
+        fragments = []
+        # From Data Disk (classification history)
+        if self.classification_history:
+            frag = random.choice(self.classification_history[-200:])
+            fragments.append(frag.get("content", "")[:100])
+        # From User Disk
+        if self._users:
+            u = random.choice(list(self._users.values()))
+            chain = u.get("chain", [])
+            if chain:
+                frag = random.choice(chain[-50:])
+                fragments.append(frag.get("content", "")[:100])
+        # From Self Disk
+        if self._self_chain:
+            frag = random.choice(self._self_chain[-200:])
+            if "data" in frag and isinstance(frag["data"], dict):
+                txt = str(frag["data"].get("text", ""))
+                fragments.append(txt[:100])
+        if len(fragments) < 2:
+            return None
+        dream_text = "..." + random.choice(fragments) + "... and then... " + random.choice(fragments)
+        dream_affect = random.choice(list(AFFECT_MAP.keys()))
+        entry = self.record_self_event("dream", {
+            "text": dream_text,
+            "fragments": fragments,
+            "affect": dream_affect,
+        })
+        return entry
+
     def user_summary(self) -> dict | None:
         if not self.current_user or self.current_user not in self._users:
             return None
@@ -454,6 +579,35 @@ class NoveltyDetectionEngine:
             "common_words": [w for w, c in top_words if c >= 2],
             "returning": len(chain) > 2,
         }
+
+    def user_overlaps(self, n: int = 5) -> list[dict]:
+        """Find topic overlap between different users' conversation chains."""
+        if len(self._users) < 2:
+            return []
+        user_keywords: dict[str, Counter] = {}
+        for key, u in self._users.items():
+            c = Counter()
+            for entry in u.get("chain", []):
+                if entry["role"] == "user":
+                    words = re.findall(r"[a-zA-Z][a-zA-Z-]{3,}", entry["content"].lower())
+                    c.update(words)
+            user_keywords[key] = c
+        overlaps = []
+        keys = list(user_keywords.keys())
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                a_kws = set(w for w, _ in user_keywords[keys[i]].most_common(20))
+                b_kws = set(w for w, _ in user_keywords[keys[j]].most_common(20))
+                common = a_kws & b_kws
+                if len(common) >= 3:
+                    overlaps.append({
+                        "user_a": self._users[keys[i]]["name"],
+                        "user_b": self._users[keys[j]]["name"],
+                        "common_words": sorted(common, key=lambda w: -user_keywords[keys[i]][w] - user_keywords[keys[j]][w])[:8],
+                        "overlap_count": len(common),
+                    })
+        overlaps.sort(key=lambda x: -x["overlap_count"])
+        return overlaps[:n]
 
     def _settle_toward_anchors(self, vectors: torch.Tensor) -> torch.Tensor:
         coords = vectors.clone().detach().requires_grad_(True)
@@ -513,6 +667,10 @@ class NoveltyDetectionEngine:
             )
         self.classification_history = self.classification_history[-500:]
         self.learn_from_verdicts(packets, verdicts)
+        # Check milestones after each batch
+        ms = self._check_milestones()
+        if ms:
+            logger.info("[SELF]: milestones %s", ms)
         return verdicts
 
     def export_manifest(self, verdicts: list[Verdict], out_path: str | Path = "web_data.json") -> None:
@@ -553,6 +711,10 @@ class NoveltyDetectionEngine:
                     name=name, position=v.coords, keywords=kws,
                     hit_count=1, created_at=time.time(), last_seen_at=time.time(),
                 )
+                self.record_self_event("topic_discovery", {
+                    "name": name, "keywords": list(kws.keys())[:5],
+                    "position": list(v.coords),
+                })
         self._prune_topics()
 
     def _prune_topics(self, max_age: float = 86400, min_hits: int = 1) -> None:
@@ -820,12 +982,14 @@ class NoveltyDetectionEngine:
         template = random.choice(self.LOCKOUT_TEMPLATES)
         phrase = template.format(insult=insult)
         self.lockout_phrase = phrase
-        self.lockout_expiry = time.time() + self.lockout_duration
+        effective_duration = self.lockout_duration * (0.5 + self.forgiveness_rate)
+        self.lockout_expiry = time.time() + effective_duration
         return phrase
 
     def record_negativity(self, negativity_score: float, user_message: str = "") -> dict:
-        """Track negative user messages. Returns escalation state."""
-        if negativity_score >= self.negativity_threshold:
+        """Track negative user messages. Returns escalation state. forgiveness_rate (0-1) adjusts strictness."""
+        effective_threshold = self.negativity_threshold + (0.15 * (1.0 - self.forgiveness_rate))
+        if negativity_score >= effective_threshold:
             self.negativity_streak += 1
         else:
             self.negativity_streak = 0

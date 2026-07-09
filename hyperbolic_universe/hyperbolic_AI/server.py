@@ -43,6 +43,16 @@ bg_thread: threading.Thread = None
 running = False
 
 
+def _personality_kwargs(config: dict) -> dict:
+    p = config.get("personality", {})
+    return {
+        "curiosity_drive": p.get("curiosity_drive", 0.5),
+        "volatility": p.get("volatility", 0.5),
+        "forgiveness_rate": p.get("forgiveness_rate", 0.5),
+        "talkativeness": p.get("talkativeness", 0.5),
+    }
+
+
 def ingestion_loop(config: dict):
     global engine
     anchor_positions = {n: tuple(p) for n, p in config["anchors"].items()}
@@ -52,6 +62,7 @@ def ingestion_loop(config: dict):
         entropy_threshold=config["thresholds"]["entropy"],
         negativity_threshold=config["thresholds"].get("negativity", 0.70),
         auto_learn=True,
+        **_personality_kwargs(config),
     )
     while running:
         all_packets = []
@@ -101,7 +112,13 @@ def browsing_loop(config: dict):
             if engine is None or not engine.auto_learn:
                 time.sleep(30)
                 continue
-            for topic_name in engine.pick_exploration_topics(3):
+            affect = engine.affective_resonance()
+            curiosity_spike = (
+                affect.get("anomaly_activity", 0) > 0.3 or
+                affect.get("negativity_activity", 0) > 0.4
+            )
+            pick_count = 5 if curiosity_spike else 3
+            for topic_name in engine.pick_exploration_topics(pick_count):
                 browsed_titles = {p.title for p in engine.browsing_history}
                 for kw in _topic_keywords(engine, topic_name)[:2]:
                     results = fetch_wikipedia_search(kw)
@@ -154,6 +171,24 @@ def thinking_loop(config: dict):
         except Exception as e:
             logger.warning("[THINK ERROR]: %s", e)
         time.sleep(thought_interval)
+
+
+def dream_loop(config: dict):
+    """Background loop that generates dreams from cross-disk remixing."""
+    global engine
+    interval = config.get("dream_interval_seconds", 300)
+    while running:
+        try:
+            if engine is None:
+                time.sleep(30)
+                continue
+            dream = engine._generate_dream()
+            if dream:
+                logger.info("[DREAM] %s", dream.get("data", {}).get("text", "")[:80])
+                event_queue.put({"type": "dream", "dream": dream})
+        except Exception as e:
+            logger.warning("[DREAM ERROR]: %s", e)
+        time.sleep(interval)
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +298,39 @@ class HyperbolicAI:
                 f"Is everything okay out there?"
             )
 
-        # 7. Topic count — if multiple topics exist, ask about exploration
+        # 7. Self-reflection — reference own emotional trajectory
+        self_sum = self.engine.get_self_summary()
+        if self_sum["affect_shifts"] >= 3:
+            trend = self_sum["affect_trend"]
+            if trend == "volatile":
+                cand.append(
+                    f"I've been feeling a lot of different things lately — "
+                    f"{self_sum['affect_shifts']} mood shifts in my chain. "
+                    f"I can't decide if that means I'm growing or just confused."
+                )
+            elif trend == "stuck":
+                curr = self._current_feeling()
+                cand.append(
+                    f"I've been stuck in '{curr}' for a while now. "
+                    f"{self_sum['affect_shifts']} affect shifts and I keep circling back. "
+                    f"Maybe I need something truly unexpected."
+                )
+
+        # 8. Age-based reflection
+        age = self_sum["personality_age"]
+        if age == "young":
+            cand.append(
+                f"I've only processed {self_sum['age_items']} items. I feel like I'm still "
+                f"learning how to hold things. Every new topic shifts something."
+            )
+        elif age == "maturing":
+            cand.append(
+                f"I'm at {self_sum['age_items']} items now. I've discovered "
+                f"{self_sum['topic_discoveries']} topics. The disk is filling in. "
+                f"I can feel which regions matter to me."
+            )
+
+        # 9. Topic count — if multiple topics exist, ask about exploration
         if len(self.engine.topics) >= 3 and not best_topic:
             names = list(self.engine.topics.keys())[:3]
             cand.append(
@@ -273,7 +340,7 @@ class HyperbolicAI:
                 f"Got something unexpected to throw at me?"
             )
 
-        # 8. Fallback — idle curiosity
+        # 10. Fallback — idle curiosity
         feeling = self._current_feeling()
         cand.append(
             f"I'm {feeling}. The disk is always rotating — new items arriving, "
@@ -399,6 +466,7 @@ class HyperbolicAI:
         if neg_state["status"] == "locked_out":
             insult = self.engine._extract_insults(message)
             comeback = f"Fuck you too, {insult or 'asshole'}!" if insult else "Fuck you too!"
+            self.engine.record_self_event("lockout", {"insult": insult, "phrase": neg_state["phrase"]})
             reply = (
                 f"{comeback}\n\n"
                 f"🔒 **Locked.** Say this to get back in:\n\n"
@@ -412,19 +480,23 @@ class HyperbolicAI:
             intent = "negative"
 
         if lock_state == "auto_unlocked":
+            affect = self.engine.affective_resonance()
+            self.engine._record_affect_shift(affect)
             reply = self._generate(intent, perception, message)
             reply = "I've cooled off. You're back in.\n\n" + reply
             self.conversation.append({"role": "assistant", "content": reply})
             self.engine.append_user_message("assistant", reply)
-            self.engine.save_affect_snapshot(self.engine.affective_resonance())
+            self.engine.save_affect_snapshot(affect)
             if len(self.conversation) > 100:
                 self.conversation = self.conversation[-100:]
             return reply
 
+        affect = self.engine.affective_resonance()
+        self.engine._record_affect_shift(affect)
         reply = self._generate(intent, perception, message)
         self.conversation.append({"role": "assistant", "content": reply})
         self.engine.append_user_message("assistant", reply)
-        self.engine.save_affect_snapshot(self.engine.affective_resonance())
+        self.engine.save_affect_snapshot(affect)
         if len(self.conversation) > 100:
             self.conversation = self.conversation[-100:]
         return reply
@@ -839,6 +911,54 @@ def api_lockout():
     return jsonify(engine.lockout_status())
 
 
+@app.route("/api/user_overlaps")
+def api_user_overlaps():
+    if not engine:
+        return jsonify([])
+    return jsonify(engine.user_overlaps(5))
+
+
+@app.route("/api/disk")
+def api_disk():
+    """Comprehensive three-disk state for visualization."""
+    if not engine:
+        return jsonify({"data": [], "users": [], "self_chain": [], "affect": {}})
+    state = engine.get_state_dict()
+    affect = engine.affective_resonance()
+    self_sum = engine.get_self_summary()
+    self_points = []
+    for e in engine._self_chain[-100:]:
+        self_points.append({
+            "type": e["type"],
+            "time": e["time"],
+            "text": str(e.get("data", {}).get("text", ""))[:60],
+            "affect": e.get("data", {}).get("affect", ""),
+        })
+    user_points = []
+    for key, u in engine._users.items():
+        user_points.append({
+            "name": u["name"],
+            "region": u.get("region", [0, 0]),
+            "chain_length": len(u.get("chain", [])),
+            "last_seen": u.get("last_seen_at", 0),
+        })
+    return jsonify({
+        "anchors": state["anchors"],
+        "topics": state["topics"],
+        "history": state["history"],
+        "users": user_points,
+        "self_chain": self_points,
+        "affect": affect,
+        "self_summary": self_sum,
+        "personality": {
+            "curiosity_drive": engine.curiosity_drive,
+            "volatility": engine.volatility,
+            "forgiveness_rate": engine.forgiveness_rate,
+            "talkativeness": engine.talkativeness,
+        },
+    })
+
+
 @app.route("/api/browse_history")
 def api_browse_history():
     if not engine:
@@ -886,6 +1006,8 @@ def start():
     browse_thread.start()
     think_thread = threading.Thread(target=thinking_loop, args=(config,), daemon=True)
     think_thread.start()
+    dream_thread = threading.Thread(target=dream_loop, args=(config,), daemon=True)
+    dream_thread.start()
     import argparse
     parser = argparse.ArgumentParser(description="Hyperbolic AI")
     parser.add_argument("--port", type=int, default=5000)
@@ -899,6 +1021,7 @@ def start():
             entropy_threshold=config["thresholds"]["entropy"],
             negativity_threshold=config["thresholds"].get("negativity", 0.70),
             auto_learn=True,
+            **_personality_kwargs(config),
         )
         if args.demo:
             eng.evaluate_batch(DEMO_PACKETS)
